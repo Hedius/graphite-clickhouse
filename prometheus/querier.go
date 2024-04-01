@@ -9,14 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/storage"
-
 	"github.com/lomik/graphite-clickhouse/config"
 	"github.com/lomik/graphite-clickhouse/finder"
 	"github.com/lomik/graphite-clickhouse/helper/clickhouse"
 	"github.com/lomik/graphite-clickhouse/pkg/scope"
 	"github.com/lomik/graphite-clickhouse/pkg/where"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/util/annotations"
 )
 
 // Querier provides reading access to time series data.
@@ -24,7 +23,6 @@ type Querier struct {
 	config *config.Config
 	mint   int64
 	maxt   int64
-	ctx    context.Context
 }
 
 // Close releases the resources of the Querier.
@@ -33,7 +31,7 @@ func (q *Querier) Close() error {
 }
 
 // LabelValues returns all potential values for a label name.
-func (q *Querier) LabelValues(label string, matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
+func (q *Querier) LabelValues(ctx context.Context, label string, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	terms := []finder.TaggedTerm{
 		{
 			Key:         strings.ReplaceAll(label, `_`, `\_`),
@@ -48,7 +46,7 @@ func (q *Querier) LabelValues(label string, matchers ...*labels.Matcher) ([]stri
 		return nil, nil, err
 	}
 	terms = append(terms, matcherTerms...)
-	
+
 	wr, _, err := finder.TaggedWhere(terms)
 	if err != nil {
 		return nil, nil, err
@@ -63,7 +61,7 @@ func (q *Querier) LabelValues(label string, matchers ...*labels.Matcher) ([]stri
 	)
 
 	body, _, _, err := clickhouse.Query(
-		scope.WithTable(q.ctx, q.config.ClickHouse.TaggedTable),
+		scope.WithTable(ctx, q.config.ClickHouse.TaggedTable),
 		q.config.ClickHouse.URL,
 		sql,
 		clickhouse.Options{
@@ -86,7 +84,7 @@ func (q *Querier) LabelValues(label string, matchers ...*labels.Matcher) ([]stri
 }
 
 // LabelNames returns all the unique label names present in the block in sorted order.
-func (q *Querier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
+func (q *Querier) LabelNames(ctx context.Context, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	terms, err := makeTaggedFromPromQL(matchers)
 	if err != nil {
 		return nil, nil, err
@@ -109,7 +107,7 @@ func (q *Querier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.War
 	)
 
 	body, _, _, err := clickhouse.Query(
-		scope.WithTable(q.ctx, q.config.ClickHouse.TaggedTable),
+		scope.WithTable(ctx, q.config.ClickHouse.TaggedTable),
 		q.config.ClickHouse.URL,
 		sql,
 		clickhouse.Options{
