@@ -71,7 +71,12 @@ func Run(config *config.Config, version string) error {
 		LookbackDelta:              config.Prometheus.LookbackDelta,
 		RemoteReadConcurrencyLimit: config.Prometheus.RemoteReadConcurrencyLimit,
 		Version: &web.PrometheusVersion{
-			Version: version,
+			Version:   version,
+			Revision:  "",
+			Branch:    "",
+			BuildUser: "",
+			BuildDate: "",
+			GoVersion: "",
 		},
 	})
 
