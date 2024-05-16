@@ -293,7 +293,7 @@ func main() {
 	})
 
 	if cfg.Prometheus.Listen != "" {
-		if err := prometheus.Run(cfg); err != nil {
+		if err := prometheus.Run(cfg, Version); err != nil {
 			log.Fatal(err)
 		}
 	}

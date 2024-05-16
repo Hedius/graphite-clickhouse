@@ -20,7 +20,7 @@ import (
 	"github.com/prometheus/prometheus/web"
 )
 
-func Run(config *config.Config) error {
+func Run(config *config.Config, version string) error {
 	zapLogger := &logger{
 		z: zapwriter.Logger("prometheus"),
 	}
@@ -70,6 +70,9 @@ func Run(config *config.Config) error {
 		PageTitle:                  config.Prometheus.PageTitle,
 		LookbackDelta:              config.Prometheus.LookbackDelta,
 		RemoteReadConcurrencyLimit: config.Prometheus.RemoteReadConcurrencyLimit,
+		Version: &web.PrometheusVersion{
+			Version: version,
+		},
 	})
 
 	promHandler.ApplyConfig(&promConfig.Config{})
