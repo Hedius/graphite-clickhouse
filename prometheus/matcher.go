@@ -26,6 +26,28 @@ var promqlMatchMap = map[labels.MatchType]finder.TaggedTermOp{
 	labels.MatchNotRegexp: finder.TaggedTermNotMatch,
 }
 
+func makeTaggedFromPromPB(matchers []*prompb.LabelMatcher) ([]finder.TaggedTerm, error) {
+	terms := make([]finder.TaggedTerm, 0, len(matchers))
+	for i := 0; i < len(matchers); i++ {
+		if matchers[i] == nil {
+			continue
+		}
+		op, ok := prompbMatchMap[matchers[i].Type]
+		if !ok {
+			return nil, fmt.Errorf("unknown matcher type %#v", matchers[i].GetType())
+		}
+		terms = append(terms, finder.TaggedTerm{
+			Key:   matchers[i].Name,
+			Value: matchers[i].Value,
+			Op:    op,
+		})
+	}
+
+	sort.Sort(finder.TaggedTermList(terms))
+
+	return terms, nil
+}
+
 func makeTaggedFromPromQL(matchers []*labels.Matcher) ([]finder.TaggedTerm, error) {
 	terms := make([]finder.TaggedTerm, 0, len(matchers))
 	for i := 0; i < len(matchers); i++ {
