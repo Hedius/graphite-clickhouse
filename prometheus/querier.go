@@ -6,12 +6,8 @@ package prometheus
 import (
 	"context"
 	"fmt"
-	"github.com/prometheus/prometheus/util/annotations"
 	"strings"
 	"time"
-
-	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/storage"
 
 	"github.com/lomik/graphite-clickhouse/config"
 	"github.com/lomik/graphite-clickhouse/finder"
@@ -19,6 +15,7 @@ import (
 	"github.com/lomik/graphite-clickhouse/pkg/scope"
 	"github.com/lomik/graphite-clickhouse/pkg/where"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/util/annotations"
 )
 
 // Querier provides reading access to time series data.
@@ -50,7 +47,7 @@ func (q *Querier) LabelValues(ctx context.Context, label string, matchers ...*la
 	}
 	terms = append(terms, matcherTerms...)
 
-	w, _, err := finder.TaggedWhere(terms)
+	w, _, err := finder.TaggedWhere(terms, q.config.FeatureFlags.UseCarbonBehavior, q.config.FeatureFlags.DontMatchMissingTags)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -95,7 +92,7 @@ func (q *Querier) LabelNames(ctx context.Context, matchers ...*labels.Matcher) (
 	w := where.New()
 	// @TODO: this is duplicate to the for in finder.TaggedWhere. (different start...)
 	for i := 0; i < len(terms); i++ {
-		and, err := finder.TaggedTermWhereN(&terms[i])
+		and, err := finder.TaggedTermWhereN(&terms[i], q.config.FeatureFlags.UseCarbonBehavior, q.config.FeatureFlags.DontMatchMissingTags)
 		if err != nil {
 			return nil, nil, err
 		}
