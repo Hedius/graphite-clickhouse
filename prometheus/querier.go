@@ -47,17 +47,17 @@ func (q *Querier) LabelValues(ctx context.Context, label string, matchers ...*la
 	}
 	terms = append(terms, matcherTerms...)
 
-	wr, _, err := finder.TaggedWhere(terms)
+	w, _, err := finder.TaggedWhere(terms, q.config.FeatureFlags.UseCarbonBehavior, q.config.FeatureFlags.DontMatchMissingTags)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	fromDate := timeNow().AddDate(0, 0, -q.config.ClickHouse.TaggedAutocompleDays)
-	wr.Andf("Date >= '%s'", fromDate.Format("2006-01-02"))
+	w.Andf("Date >= '%s'", fromDate.Format("2006-01-02"))
 
 	sql := fmt.Sprintf("SELECT splitByChar('=', Tag1)[2] as value FROM %s %s GROUP BY value ORDER BY value",
 		q.config.ClickHouse.TaggedTable,
-		wr.SQL(),
+		w.SQL(),
 	)
 
 	body, _, _, err := clickhouse.Query(
@@ -92,7 +92,7 @@ func (q *Querier) LabelNames(ctx context.Context, matchers ...*labels.Matcher) (
 	w := where.New()
 	// @TODO: this is duplicate to the for in finder.TaggedWhere. (different start...)
 	for i := 0; i < len(terms); i++ {
-		and, err := finder.TaggedTermWhereN(&terms[i])
+		and, err := finder.TaggedTermWhereN(&terms[i], q.config.FeatureFlags.UseCarbonBehavior, q.config.FeatureFlags.DontMatchMissingTags)
 		if err != nil {
 			return nil, nil, err
 		}
