@@ -33,10 +33,12 @@ func Run(config *config.Config, version string) error {
 	}
 
 	queryEngine := promql.NewEngine(promql.EngineOpts{
-		Logger:        zapLogger,
-		Timeout:       time.Minute,
-		MaxSamples:    50000000,
-		LookbackDelta: config.Prometheus.LookbackDelta,
+		Logger:               zapLogger,
+		Timeout:              time.Minute,
+		MaxSamples:           50000000,
+		LookbackDelta:        config.Prometheus.LookbackDelta,
+		EnableAtModifier:     true,
+		EnableNegativeOffset: true,
 	})
 
 	scrapeManager, err := scrape.NewManager(&scrape.Options{}, zapLogger, storage, prometheus.DefaultRegisterer)
