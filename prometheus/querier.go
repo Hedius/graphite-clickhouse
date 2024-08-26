@@ -6,6 +6,8 @@ package prometheus
 import (
 	"context"
 	"fmt"
+	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/util/annotations"
 	"strings"
 	"time"
 
