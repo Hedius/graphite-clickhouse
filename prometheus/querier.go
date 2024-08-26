@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/prometheus/prometheus/storage"
-	"github.com/prometheus/prometheus/util/annotations"
 	"strings"
 	"time"
 
@@ -33,7 +32,7 @@ func (q *Querier) Close() error {
 }
 
 // LabelValues returns all potential values for a label name.
-func (q *Querier) LabelValues(ctx context.Context, label string, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+func (q *Querier) LabelValues(ctx context.Context, label string, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	terms := []finder.TaggedTerm{
 		{
 			Key:         strings.ReplaceAll(label, `_`, `\_`),
@@ -86,7 +85,7 @@ func (q *Querier) LabelValues(ctx context.Context, label string, matchers ...*la
 }
 
 // LabelNames returns all the unique label names present in the block in sorted order.
-func (q *Querier) LabelNames(ctx context.Context, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+func (q *Querier) LabelNames(ctx context.Context, hints *storage.LabelHints, matchers ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	terms, err := makeTaggedFromPromQL(matchers)
 	if err != nil {
 		return nil, nil, err
