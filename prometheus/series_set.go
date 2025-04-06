@@ -19,17 +19,19 @@ import (
 
 // SeriesIterator iterates over the data of a time series.
 type seriesIterator struct {
-	metricName string
-	points     []point.Point
-	current    int
-	step       int64
+	metricName    string
+	points        []point.Point
+	current       int
+	step          int64
+	keepLastPoint bool
 }
 
 // Series represents a single time series.
 type series struct {
-	metricName string
-	points     []point.Point
-	step       int64
+	metricName    string
+	points        []point.Point
+	step          int64
+	keepLastPoint bool
 }
 
 // SeriesSet contains a set of series.
@@ -40,7 +42,7 @@ type seriesSet struct {
 
 var _ storage.SeriesSet = &seriesSet{}
 
-func makeSeriesSet(data *data.Data, step int64) (storage.SeriesSet, error) {
+func makeSeriesSet(data *data.Data, step int64, keepLastPoint bool) (storage.SeriesSet, error) {
 	ss := &seriesSet{series: make([]series, 0), current: -1}
 	if data == nil {
 		return ss, nil
@@ -59,7 +61,7 @@ func makeSeriesSet(data *data.Data, step int64) (storage.SeriesSet, error) {
 
 		metricName := data.MetricName(points[0].MetricID)
 		for _, v := range data.AM.Get(metricName) {
-			ss.series = append(ss.series, series{metricName: v.DisplayName, points: points, step: step})
+			ss.series = append(ss.series, series{metricName: v.DisplayName, points: points, step: step, keepLastPoint: keepLastPoint})
 		}
 	}
 
@@ -96,11 +98,19 @@ func (sit *seriesIterator) Seek(t int64) chunkenc.ValueType {
 // At returns the current timestamp/value pair.
 func (sit *seriesIterator) At() (t int64, v float64) {
 	index := sit.current
-	if index == len(sit.points) {
+	if !sit.keepLastPoint && index == len(sit.points) {
+		// return NaN if the series does not have a point for this step
 		return int64(sit.points[len(sit.points)-1].Time)*1000 + sit.step, math.NaN()
 	}
-	if index < 0 || index >= len(sit.points) {
+	// This works fine as long as our metric has delivered a data point in the selected range.
+	// If lookback-delta is too high this starts creating a pseudo row!... Keep it below 5m.
+	if index < 0 {
 		index = 0
+	} else if index >= len(sit.points) {
+		// this achieves that we return the last value in the window to instant requests.
+		// otherwise they report the 1st value of the range...
+		// This also causes that the point is reported for the full lookback-delta
+		index = len(sit.points) - 1
 	}
 	p := sit.points[index]
 	// sit.logger().Debug("seriesIterator.At", zap.Int64("t", int64(p.Time)*1000), zap.Float64("v", p.Value))
@@ -180,7 +190,13 @@ func (s *seriesSet) Warnings() annotations.Annotations {
 
 // Iterator returns a new iterator of the data of the series.
 func (s *series) Iterator(iterator chunkenc.Iterator) chunkenc.Iterator {
-	return &seriesIterator{metricName: s.metricName, points: s.points, current: -1, step: s.step}
+	return &seriesIterator{
+		metricName:    s.metricName,
+		points:        s.points,
+		current:       -1,
+		step:          s.step,
+		keepLastPoint: s.keepLastPoint,
+	}
 }
 
 func (s *series) name() string {
