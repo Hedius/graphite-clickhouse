@@ -454,6 +454,8 @@ Only one tag used as filter for index field Tag1, see graphite_tagged table [str
  external-url = ""
  page-title = "Prometheus Time Series Collection and Processing Server"
  lookback-delta = "5m0s"
+ # return the last data point in a series instead of NaN if set
+ keep-last-point = false
  # concurrently handled remote read requests
  remote-read-concurrency-limit = 10
 

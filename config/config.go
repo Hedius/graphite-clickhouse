@@ -300,6 +300,7 @@ type Prometheus struct {
 	ExternalURL                *url.URL      `toml:"-"                             json:"-"`
 	PageTitle                  string        `toml:"page-title"                    json:"page-title"`
 	LookbackDelta              time.Duration `toml:"lookback-delta"                json:"lookback-delta"`
+	KeepLastPoint			   bool          `toml:"keep-last-point"               json:"keep-last-point"               comment:"return the last data point in a series instead of NaN if set"`
 	RemoteReadConcurrencyLimit int           `toml:"remote-read-concurrency-limit" json:"remote-read-concurrency-limit" comment:"concurrently handled remote read requests"`
 }
 
