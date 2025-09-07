@@ -58,6 +58,7 @@ func parseJson(body []byte) (*Rules, error) {
 			if d.Function != "" {
 				defaultFunction = d.Function
 			}
+
 			if d.Precision != 0 {
 				rt, err := makeRetention(&d)
 				if err != nil {
@@ -75,6 +76,7 @@ func parseJson(body []byte) (*Rules, error) {
 					Function:  d.Function,
 				})
 			}
+
 			if d.Precision != 0 {
 				rt, err := makeRetention(&d)
 				if err != nil {
