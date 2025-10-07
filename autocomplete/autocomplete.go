@@ -53,6 +53,7 @@ func NewValues(config *config.Config) *Handler {
 func dateString(autocompleteDays int, tm time.Time) (string, string) {
 	fromDate := date.FromTimeToDaysFormat(tm.AddDate(0, 0, -autocompleteDays))
 	untilDate := date.UntilTimeToDaysFormat(tm)
+
 	return fromDate, untilDate
 }
 
@@ -70,12 +71,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) requestExpr(r *http.Request) (*where.Where, *where.Where, map[string]bool, error) {
-	f := r.Form["expr"]
-	expr := make([]string, 0, len(f))
-	for i := 0; i < len(f); i++ {
-		if f[i] != "" {
-			expr = append(expr, f[i])
+func getTagCountQuerier(config *config.Config, opts clickhouse.Options) *finder.TagCountQuerier {
+	var tcq *finder.TagCountQuerier = nil
+	if config.ClickHouse.TagsCountTable != "" {
+		tcq = finder.NewTagCountQuerier(
+			config.ClickHouse.URL,
+			config.ClickHouse.TagsCountTable,
+			opts,
+			config.FeatureFlags.UseCarbonBehavior,
+			config.FeatureFlags.DontMatchMissingTags,
+			config.ClickHouse.TaggedUseDaily,
+		)
+	}
+
+	return tcq
+}
+
+func (h *Handler) requestExpr(r *http.Request, tcq *finder.TagCountQuerier, from, until int64) (*where.Where, *where.Where, map[string]bool, error) {
+	formExpr := r.Form["expr"]
+	expr := make([]string, 0, len(formExpr))
+
+	for i := 0; i < len(formExpr); i++ {
+		if formExpr[i] != "" {
+			expr = append(expr, formExpr[i])
 		}
 	}
 
@@ -93,6 +111,21 @@ func (h *Handler) requestExpr(r *http.Request) (*where.Where, *where.Where, map[
 		return wr, pw, usedTags, err
 	}
 
+	if tcq != nil {
+		tagValuesCosts, err := tcq.GetCostsFromCountTable(r.Context(), terms, from, until)
+		if err != nil {
+			return wr, pw, usedTags, err
+		}
+
+		if tagValuesCosts != nil {
+			finder.SetCosts(terms, tagValuesCosts)
+		} else if len(h.config.ClickHouse.TaggedCosts) != 0 {
+			finder.SetCosts(terms, h.config.ClickHouse.TaggedCosts)
+		}
+	}
+
+	finder.SortTaggedTermsByCost(terms)
+
 	wr, pw, err = finder.TaggedWhere(terms, h.config.FeatureFlags.UseCarbonBehavior, h.config.FeatureFlags.DontMatchMissingTags)
 	if err != nil {
 		return wr, pw, usedTags, err
@@ -108,7 +141,9 @@ func (h *Handler) requestExpr(r *http.Request) (*where.Where, *where.Where, map[
 
 func taggedKey(typ string, truncateSec int32, fromDate, untilDate string, tag string, exprs []string, tagPrefix string, limit int) (string, string) {
 	ts := utils.TimestampTruncate(timeNow().Unix(), time.Duration(truncateSec)*time.Second)
+
 	var sb stringutils.Builder
+
 	sb.Grow(128)
 	sb.WriteString(typ)
 	sb.WriteString(fromDate)
@@ -117,30 +152,37 @@ func taggedKey(typ string, truncateSec int32, fromDate, untilDate string, tag st
 	sb.WriteString(";limit=")
 	sb.WriteInt(int64(limit), 10)
 	tagStart := sb.Len()
+
 	if tagPrefix != "" {
 		sb.WriteString(";tagPrefix=")
 		sb.WriteString(tagPrefix)
 	}
+
 	if tag != "" {
 		sb.WriteString(";tag=")
 		sb.WriteString(tag)
 	}
+
 	for _, expr := range exprs {
 		sb.WriteString(";expr='")
 		sb.WriteString(strings.Replace(expr, " = ", "=", 1))
 		sb.WriteByte('\'')
 	}
+
 	exprEnd := sb.Len()
 	sb.WriteString(";ts=")
 	sb.WriteString(strconv.FormatInt(ts, 10))
 
 	s := sb.String()
+
 	return s, s[tagStart:exprEnd]
 }
 
 func taggedValuesKey(typ string, truncateSec int32, fromDate, untilDate string, tag string, exprs []string, valuePrefix string, limit int) (string, string) {
 	ts := utils.TimestampTruncate(timeNow().Unix(), time.Duration(truncateSec)*time.Second)
+
 	var sb stringutils.Builder
+
 	sb.Grow(128)
 	sb.WriteString(typ)
 	sb.WriteString(fromDate)
@@ -149,24 +191,29 @@ func taggedValuesKey(typ string, truncateSec int32, fromDate, untilDate string, 
 	sb.WriteString(";limit=")
 	sb.WriteInt(int64(limit), 10)
 	tagStart := sb.Len()
+
 	if valuePrefix != "" {
 		sb.WriteString(";valuePrefix=")
 		sb.WriteString(valuePrefix)
 	}
+
 	if tag != "" {
 		sb.WriteString(";tag=")
 		sb.WriteString(tag)
 	}
+
 	for _, expr := range exprs {
 		sb.WriteString(";expr='")
 		sb.WriteString(strings.Replace(expr, " = ", "=", 1))
 		sb.WriteByte('\'')
 	}
+
 	exprEnd := sb.Len()
 	sb.WriteString(";ts=")
 	sb.WriteString(strconv.FormatInt(ts, 10))
 
 	s := sb.String()
+
 	return s, s[tagStart:exprEnd]
 }
 
@@ -198,6 +245,7 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 		queueFail     bool
 		queueDuration time.Duration
 		findCache     bool
+		opts          clickhouse.Options
 	)
 
 	username := r.Header.Get("X-Forwarded-User")
@@ -206,20 +254,24 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			status = http.StatusInternalServerError
+
 			logger.Error("panic during eval:",
 				zap.String("requestID", scope.String(r.Context(), "requestID")),
 				zap.Any("reason", rec),
 				zap.Stack("stack"),
 			)
+
 			answer := fmt.Sprintf("%v\nStack trace: %v", rec, zap.Stack("").String)
 			http.Error(w, answer, status)
 		}
+
 		d := time.Since(start)
 		dMS := d.Milliseconds()
 		logs.AccessLog(accessLogger, h.config, r, status, d, queueDuration, findCache, queueFail)
 		limiter.SendDuration(queueDuration.Milliseconds())
 		metrics.SendFindMetrics(metrics.TagsRequestMetric, status, dMS, 0, h.config.Metrics.ExtendedStat, metricsCount)
-		if !findCache && chReadRows != 0 && chReadBytes != 0 {
+
+		if !findCache && chReadRows > 0 && chReadBytes > 0 {
 			errored := status != http.StatusOK && status != http.StatusNotFound
 			metrics.SendQueryRead(metrics.AutocompleteQMetric, 0, 0, dMS, metricsCount, readBytes, chReadRows, chReadBytes, errored)
 		}
@@ -237,10 +289,12 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 		if err == finder.ErrCostlySeriesByTag {
 			status = http.StatusForbidden
 			http.Error(w, err.Error(), status)
+
 			return
 		} else if err != nil {
 			status = http.StatusBadRequest
 			http.Error(w, err.Error(), status)
+
 			return
 		}
 	}
@@ -248,26 +302,45 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 	fromDate, untilDate := dateString(h.config.ClickHouse.TaggedAutocompleDays, start)
 
 	var key string
+
 	exprs := r.Form["expr"]
 	// params := taggedTagsQuery(exprs, tagPrefix, limit)
 
 	useCache := h.config.Common.FindCache != nil && h.config.Common.FindCacheConfig.FindTimeoutSec > 0 && !parser.TruthyBool(r.FormValue("noCache"))
 	if useCache {
 		key, _ = taggedKey("tags;", h.config.Common.FindCacheConfig.FindTimeoutSec, fromDate, untilDate, "", exprs, tagPrefix, limit)
+
 		body, err = h.config.Common.FindCache.Get(key)
 		if err == nil {
 			if metrics.FinderCacheMetrics != nil {
 				metrics.FinderCacheMetrics.CacheHits.Add(1)
 			}
+
 			findCache = true
+
 			w.Header().Set("X-Cached-Find", strconv.Itoa(int(h.config.Common.FindCacheConfig.FindTimeoutSec)))
 		}
 	}
 
-	wr, pw, usedTags, err := h.requestExpr(r)
+	opts = clickhouse.Options{
+		TLSConfig:               h.config.ClickHouse.TLSConfig,
+		Timeout:                 h.config.ClickHouse.IndexTimeout,
+		ConnectTimeout:          h.config.ClickHouse.ConnectTimeout,
+		CheckRequestProgress:    h.config.FeatureFlags.LogQueryProgress,
+		ProgressSendingInterval: h.config.ClickHouse.ProgressSendingInterval,
+	}
+
+	wr, pw, usedTags, err := h.requestExpr(
+		r,
+		getTagCountQuerier(h.config, opts),
+		start.AddDate(0, 0, -h.config.ClickHouse.TaggedAutocompleDays).Unix(),
+		start.Unix(),
+	)
+
 	if err != nil {
 		status = http.StatusBadRequest
 		http.Error(w, err.Error(), status)
+
 		return
 	}
 
@@ -276,11 +349,13 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 
 		if len(usedTags) == 0 {
 			valueSQL = "splitByChar('=', Tag1)[1] AS value"
+
 			if tagPrefix != "" {
 				wr.And(where.HasPrefix("Tag1", tagPrefix))
 			}
 		} else {
 			valueSQL = "splitByChar('=', arrayJoin(Tags))[1] AS value"
+
 			if tagPrefix != "" {
 				wr.And(where.HasPrefix("arrayJoin(Tags)", tagPrefix))
 			}
@@ -303,24 +378,31 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 			ctx     context.Context
 			cancel  context.CancelFunc
 		)
+
 		if limiter.Enabled() {
 			ctx, cancel = context.WithTimeout(context.Background(), h.config.ClickHouse.IndexTimeout)
 			defer cancel()
 
 			err = limiter.Enter(ctx, "tags")
 			queueDuration = time.Since(start)
+
 			if err != nil {
 				status = http.StatusServiceUnavailable
 				queueFail = true
+
 				logger.Error(err.Error())
 				http.Error(w, err.Error(), status)
+
 				return
 			}
+
 			queueDuration = time.Since(start)
 			entered = true
+
 			defer func() {
 				if entered {
 					limiter.Leave(ctx, "tags")
+
 					entered = false
 				}
 			}()
@@ -330,17 +412,14 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 			scope.WithTable(r.Context(), h.config.ClickHouse.TaggedTable),
 			h.config.ClickHouse.URL,
 			sql,
-			clickhouse.Options{
-				TLSConfig:      h.config.ClickHouse.TLSConfig,
-				Timeout:        h.config.ClickHouse.IndexTimeout,
-				ConnectTimeout: h.config.ClickHouse.ConnectTimeout,
-			},
+			opts,
 			nil,
 		)
 
 		if entered {
 			// release early as possible
 			limiter.Leave(ctx, "tags")
+
 			entered = false
 		}
 
@@ -348,12 +427,14 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 			status, _ = clickhouse.HandleError(w, err)
 			return
 		}
+
 		readBytes = int64(len(body))
 
 		if useCache {
 			if metrics.FinderCacheMetrics != nil {
 				metrics.FinderCacheMetrics.CacheMisses.Add(1)
 			}
+
 			h.config.Common.FindCache.Set(key, body, h.config.Common.FindCacheConfig.FindTimeoutSec)
 		}
 	}
@@ -362,6 +443,7 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 	tags := make([]string, 0, uint64(len(rows))+1) // +1 - reserve for "name" tag
 
 	hasName := false
+
 	for i := 0; i < len(rows); i++ {
 		if rows[i] == "" {
 			continue
@@ -387,9 +469,11 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sort.Strings(tags)
+
 	if len(tags) > limit {
 		tags = tags[:limit]
 	}
+
 	if useCache {
 		if findCache {
 			logger.Info("finder", zap.String("get_cache", key),
@@ -406,6 +490,7 @@ func (h *Handler) ServeTags(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status = http.StatusInternalServerError
 		http.Error(w, err.Error(), status)
+
 		return
 	}
 
@@ -445,6 +530,7 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 		queueFail     bool
 		queueDuration time.Duration
 		findCache     bool
+		opts          clickhouse.Options
 	)
 
 	username := r.Header.Get("X-Forwarded-User")
@@ -453,19 +539,23 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			status = http.StatusInternalServerError
+
 			logger.Error("panic during eval:",
 				zap.String("requestID", scope.String(r.Context(), "requestID")),
 				zap.Any("reason", rec),
 				zap.Stack("stack"),
 			)
+
 			answer := fmt.Sprintf("%v\nStack trace: %v", rec, zap.Stack("").String)
 			http.Error(w, answer, status)
 		}
+
 		d := time.Since(start)
 		dMS := d.Milliseconds()
 		logs.AccessLog(accessLogger, h.config, r, status, d, queueDuration, findCache, queueFail)
 		limiter.SendDuration(queueDuration.Milliseconds())
 		metrics.SendFindMetrics(metrics.TagsRequestMetric, status, dMS, 0, h.config.Metrics.ExtendedStat, metricsCount)
+
 		if !findCache && chReadRows > 0 && chReadBytes > 0 {
 			errored := status != http.StatusOK && status != http.StatusNotFound
 			metrics.SendQueryRead(metrics.AutocompleteQMetric, 0, 0, dMS, metricsCount, int64(len(body)), chReadRows, chReadBytes, errored)
@@ -473,6 +563,7 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	r.ParseMultipartForm(1024 * 1024)
+
 	tag := r.FormValue("tag")
 	if tag == "name" {
 		tag = "__name__"
@@ -487,6 +578,7 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			status = http.StatusBadRequest
 			http.Error(w, err.Error(), status)
+
 			return
 		}
 	}
@@ -494,6 +586,7 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 	fromDate, untilDate := dateString(h.config.ClickHouse.TaggedAutocompleDays, start)
 
 	var key string
+
 	exprs := r.Form["expr"]
 	// params := taggedValuesQuery(tag, exprs, valuePrefix, limit)
 
@@ -502,25 +595,44 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 	if useCache {
 		// logger = logger.With(zap.String("use_cache", "true"))
 		key, _ = taggedValuesKey("values;", h.config.Common.FindCacheConfig.FindTimeoutSec, fromDate, untilDate, tag, exprs, valuePrefix, limit)
+
 		body, err = h.config.Common.FindCache.Get(key)
 		if err == nil {
 			if metrics.FinderCacheMetrics != nil {
 				metrics.FinderCacheMetrics.CacheHits.Add(1)
 			}
+
 			findCache = true
+
 			w.Header().Set("X-Cached-Find", strconv.Itoa(int(h.config.Common.FindCacheConfig.FindTimeoutSec)))
 		}
 	}
 
+	opts = clickhouse.Options{
+		TLSConfig:               h.config.ClickHouse.TLSConfig,
+		Timeout:                 h.config.ClickHouse.IndexTimeout,
+		ConnectTimeout:          h.config.ClickHouse.ConnectTimeout,
+		CheckRequestProgress:    h.config.FeatureFlags.LogQueryProgress,
+		ProgressSendingInterval: h.config.ClickHouse.ProgressSendingInterval,
+	}
+
 	if !findCache {
-		wr, pw, usedTags, err := h.requestExpr(r)
+		wr, pw, usedTags, err := h.requestExpr(
+			r,
+			getTagCountQuerier(h.config, opts),
+			start.AddDate(0, 0, -h.config.ClickHouse.TaggedAutocompleDays).Unix(),
+			start.Unix(),
+		)
+
 		if err == finder.ErrCostlySeriesByTag {
 			status = http.StatusForbidden
 			http.Error(w, err.Error(), status)
+
 			return
 		} else if err != nil {
 			status = http.StatusBadRequest
 			http.Error(w, err.Error(), status)
+
 			return
 		}
 
@@ -529,8 +641,9 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 			valueSQL = fmt.Sprintf("substr(Tag1, %d) AS value", len(tag)+2)
 			wr.And(where.HasPrefix("Tag1", tag+"="+valuePrefix))
 		} else {
-			valueSQL = fmt.Sprintf("substr(arrayJoin(Tags), %d) AS value", len(tag)+2)
-			wr.And(where.HasPrefix("arrayJoin(Tags)", tag+"="+valuePrefix))
+			prefixSelector := where.HasPrefix("x", tag+"="+valuePrefix)
+			valueSQL = fmt.Sprintf("substr(arrayFilter(x -> %s, Tags)[1], %d) AS value", prefixSelector, len(tag)+2)
+			wr.And("arrayExists(x -> " + prefixSelector + ", Tags)")
 		}
 
 		wr.Andf("Date >= '%s' AND Date <= '%s'", fromDate, untilDate)
@@ -548,24 +661,31 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 			ctx     context.Context
 			cancel  context.CancelFunc
 		)
+
 		if limiter.Enabled() {
 			ctx, cancel = context.WithTimeout(context.Background(), h.config.ClickHouse.IndexTimeout)
 			defer cancel()
 
 			err = limiter.Enter(ctx, "tags")
 			queueDuration = time.Since(start)
+
 			if err != nil {
 				status = http.StatusServiceUnavailable
 				queueFail = true
+
 				logger.Error(err.Error())
 				http.Error(w, err.Error(), status)
+
 				return
 			}
+
 			queueDuration = time.Since(start)
 			entered = true
+
 			defer func() {
 				if entered {
 					limiter.Leave(ctx, "tags")
+
 					entered = false
 				}
 			}()
@@ -575,17 +695,14 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 			scope.WithTable(r.Context(), h.config.ClickHouse.TaggedTable),
 			h.config.ClickHouse.URL,
 			sql,
-			clickhouse.Options{
-				TLSConfig:      h.config.ClickHouse.TLSConfig,
-				Timeout:        h.config.ClickHouse.IndexTimeout,
-				ConnectTimeout: h.config.ClickHouse.ConnectTimeout,
-			},
+			opts,
 			nil,
 		)
 
 		if entered {
 			// release early as possible
 			limiter.Leave(ctx, "tags")
+
 			entered = false
 		}
 
@@ -598,6 +715,7 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 			if metrics.FinderCacheMetrics != nil {
 				metrics.FinderCacheMetrics.CacheMisses.Add(1)
 			}
+
 			h.config.Common.FindCache.Set(key, body, h.config.Common.FindCacheConfig.FindTimeoutSec)
 		}
 	}
@@ -608,6 +726,7 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 		if len(rows) > 0 && rows[len(rows)-1] == "" {
 			rows = rows[:len(rows)-1]
 		}
+
 		metricsCount = int64(len(rows))
 	}
 
@@ -627,6 +746,7 @@ func (h *Handler) ServeValues(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status = http.StatusInternalServerError
 		http.Error(w, err.Error(), status)
+
 		return
 	}
 

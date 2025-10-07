@@ -11,6 +11,7 @@ import (
 	"github.com/lomik/graphite-clickhouse/helper/clickhouse"
 	"github.com/lomik/graphite-clickhouse/helper/date"
 	"github.com/lomik/graphite-clickhouse/helper/errs"
+	"github.com/lomik/graphite-clickhouse/metrics"
 	"github.com/lomik/graphite-clickhouse/pkg/scope"
 	"github.com/lomik/graphite-clickhouse/pkg/where"
 )
@@ -37,6 +38,7 @@ type IndexFinder struct {
 	reverse      uint8  // calculated in IndexFinder.useReverse only once
 	body         []byte // clickhouse response body
 	rows         [][]byte
+	stats        []metrics.FinderStat
 	useCache     bool // rotate body if needed (for store in cache)
 	useDaily     bool
 }
@@ -59,6 +61,7 @@ func NewIndex(url string, table string, dailyEnabled bool, reverse string, rever
 		dailyEnabled: dailyEnabled,
 		confReverse:  config.IndexReverse[reverse],
 		confReverses: reverses,
+		stats:        make([]metrics.FinderStat, 0),
 		useCache:     useCache,
 	}
 }
@@ -79,14 +82,18 @@ func (idx *IndexFinder) checkReverses(query string) uint8 {
 		if len(rule.Prefix) > 0 && !strings.HasPrefix(query, rule.Prefix) {
 			continue
 		}
+
 		if len(rule.Suffix) > 0 && !strings.HasSuffix(query, rule.Suffix) {
 			continue
 		}
+
 		if rule.Regex != nil && rule.Regex.FindStringIndex(query) == nil {
 			continue
 		}
+
 		return config.IndexReverse[rule.Reverse]
 	}
+
 	return idx.confReverse
 }
 
@@ -106,6 +113,7 @@ func (idx *IndexFinder) useReverse(query string) bool {
 		idx.reverse = queryDirect
 		return idx.useReverse(query)
 	}
+
 	firstWildcardNode := strings.Count(query[:w], ".")
 
 	w = where.IndexLastWildcard(query)
@@ -115,7 +123,9 @@ func (idx *IndexFinder) useReverse(query string) bool {
 		idx.reverse = queryReversed
 		return idx.useReverse(query)
 	}
+
 	idx.reverse = queryDirect
+
 	return idx.useReverse(query)
 }
 
@@ -125,6 +135,7 @@ func useDaily(dailyEnabled bool, from, until int64) bool {
 
 func calculateIndexLevelOffset(useDaily, reverse bool) int {
 	var levelOffset int
+
 	if useDaily {
 		if reverse {
 			levelOffset = ReverseLevelOffset
@@ -162,6 +173,7 @@ func (idx *IndexFinder) whereFilter(query string, from int64, until int64) *wher
 
 	w := idx.where(query, levelOffset)
 	addDatesToWhere(w, idx.useDaily, from, until)
+
 	return w
 }
 
@@ -184,12 +196,16 @@ func validatePlainQuery(query string, wildcardMinDistance int) error {
 	return nil
 }
 
-func (idx *IndexFinder) Execute(ctx context.Context, config *config.Config, query string, from int64, until int64, stat *FinderStat) (err error) {
+func (idx *IndexFinder) Execute(ctx context.Context, config *config.Config, query string, from int64, until int64) (err error) {
 	err = validatePlainQuery(query, config.ClickHouse.WildcardMinDistance)
 	if err != nil {
 		return err
 	}
+
 	w := idx.whereFilter(query, from, until)
+
+	idx.stats = append(idx.stats, metrics.FinderStat{})
+	stat := &idx.stats[len(idx.stats)-1]
 
 	idx.body, stat.ChReadRows, stat.ChReadBytes, err = clickhouse.Query(
 		scope.WithTable(ctx, idx.table),
@@ -200,6 +216,7 @@ func (idx *IndexFinder) Execute(ctx context.Context, config *config.Config, quer
 		nil,
 	)
 	stat.Table = idx.table
+
 	if err == nil {
 		stat.ReadBytes = int64(len(idx.body))
 		idx.bodySplit()
@@ -246,6 +263,7 @@ func splitIndexBody(body []byte, useReverse, useCache bool) ([]byte, [][]byte, b
 func (idx *IndexFinder) bodySplit() {
 	setDirect := false
 	idx.body, idx.rows, setDirect = splitIndexBody(idx.body, idx.useReverse(""), idx.useCache)
+
 	if setDirect {
 		idx.reverse = queryDirect
 	}
@@ -279,4 +297,8 @@ func (idx *IndexFinder) Series() [][]byte {
 
 func (idx *IndexFinder) Bytes() ([]byte, error) {
 	return idx.body, nil
+}
+
+func (idx *IndexFinder) Stats() []metrics.FinderStat {
+	return idx.stats
 }

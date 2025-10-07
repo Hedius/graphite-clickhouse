@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/lomik/graphite-clickhouse/config"
+	"github.com/lomik/graphite-clickhouse/metrics"
 )
 
 // Special finder for query plain graphite from prometheus
@@ -21,11 +22,14 @@ type plainFromTaggedFinder struct {
 
 func makePlainFromTagged(matchers []TaggedTerm) *plainFromTaggedFinder {
 	var isMetricNameFound bool
+
 	var target string
+
 	for _, m := range matchers {
 		if m.Key == "__name__" && m.Value == "graphite" && m.Op == TaggedTermEq {
 			isMetricNameFound = true
 		}
+
 		if m.Key == "target" && m.Op == TaggedTermEq && m.Value != "" {
 			target = m.Value
 		}
@@ -64,8 +68,8 @@ func (f *plainFromTaggedFinder) Target() string {
 	return f.target
 }
 
-func (f *plainFromTaggedFinder) Execute(ctx context.Context, config *config.Config, query string, from int64, until int64, stat *FinderStat) error {
-	return f.wrappedPlain.Execute(ctx, config, query, from, until, stat)
+func (f *plainFromTaggedFinder) Execute(ctx context.Context, config *config.Config, query string, from int64, until int64) error {
+	return f.wrappedPlain.Execute(ctx, config, query, from, until)
 }
 
 // For Render
@@ -84,6 +88,7 @@ func (f *plainFromTaggedFinder) Abs(value []byte) []byte {
 	lb := []taggedLabel{
 		{"metric", path},
 	}
+
 	if f.metricName != "" {
 		name = f.metricName
 	}
@@ -104,10 +109,12 @@ func (f *plainFromTaggedFinder) Abs(value []byte) []byte {
 
 	buf.WriteString(name)
 	buf.WriteByte('?')
+
 	for i, l := range lb {
 		if i > 0 {
 			buf.WriteByte('&')
 		}
+
 		buf.WriteString(url.QueryEscape(l.name))
 		buf.WriteByte('=')
 		buf.WriteString(url.QueryEscape(l.value))
@@ -122,4 +129,8 @@ func (f *plainFromTaggedFinder) List() [][]byte {
 
 func (f *plainFromTaggedFinder) Bytes() ([]byte, error) {
 	return nil, ErrNotImplemented
+}
+
+func (f *plainFromTaggedFinder) Stats() []metrics.FinderStat {
+	return f.wrappedPlain.Stats()
 }

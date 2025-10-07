@@ -1,8 +1,10 @@
 package finder
 
 import (
+	"context"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/lomik/graphite-clickhouse/config"
 	"github.com/lomik/graphite-clickhouse/helper/clickhouse"
 	"github.com/lomik/graphite-clickhouse/helper/date"
+	chtest "github.com/lomik/graphite-clickhouse/helper/tests/clickhouse"
 	"github.com/lomik/graphite-clickhouse/pkg/where"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,7 +68,7 @@ func TestTaggedWhere(t *testing.T) {
 		{"seriesByTag('name=m{in}')", 0, "Tag1='__name__=min'", "", false},
 		{"seriesByTag('name=m{in,ax}')", 0, "Tag1 IN ('__name__=min','__name__=max')", "", false},
 		{"seriesByTag('name=m{in,ax')", 0, "", "", true},
-		{"seriesByTag('name=value','what={avg,max}')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
+		{"seriesByTag('name=value','what={avg,max}')", 0, "(Tag1='__name__=value') AND ((has(Tags, 'what=avg')) OR (has(Tags, 'what=max')))", "", false},
 		{"seriesByTag('name=value','what!={avg,max}')", 0, "(Tag1='__name__=value') AND (NOT arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
 		// grafana workaround for multi-value variables default, masked with *
 		{"seriesByTag('name=value','what=~*')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x LIKE 'what=%', Tags))", "", false}, // If All masked to value with *
@@ -73,7 +76,7 @@ func TestTaggedWhere(t *testing.T) {
 		{"seriesByTag('name=value','what=~')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x LIKE 'what=%', Tags))", "", false}, // If All masked to value with *
 		// testcases for useCarbonBehaviour=false
 		{"seriesByTag('what=')", 0, "Tag1='what='", "", false},
-		{"seriesByTag('name=value','what=')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x='what=', Tags))", "", false},
+		{"seriesByTag('name=value','what=')", 0, "(Tag1='__name__=value') AND (has(Tags, 'what='))", "", false},
 		// testcases for dontMatchMissingTags=false
 		{"seriesByTag('key!=value')", 0, "NOT arrayExists((x) -> x='key=value', Tags)", "", false},
 		{"seriesByTag('dc!=de', 'cpu=cpu-total')", 0, "(Tag1='cpu=cpu-total') AND (NOT arrayExists((x) -> x='dc=de', Tags))", "", false},
@@ -88,12 +91,14 @@ func TestTaggedWhere(t *testing.T) {
 			config := config.New()
 			config.ClickHouse.TagsMinInQuery = test.minTags
 			terms, err := ParseSeriesByTag(test.query, config)
+			sort.Sort(TaggedTermList(terms))
 
 			if test.isErr {
 				if err != nil {
 					return
 				}
 			}
+
 			require.NoError(err, testName+", err")
 
 			var w, pw *where.Where
@@ -164,7 +169,7 @@ func TestTaggedWhere_UseCarbonBehaviourFlag(t *testing.T) {
 		{"seriesByTag('name=m{in}')", 0, "Tag1='__name__=min'", "", false},
 		{"seriesByTag('name=m{in,ax}')", 0, "Tag1 IN ('__name__=min','__name__=max')", "", false},
 		{"seriesByTag('name=m{in,ax')", 0, "", "", true},
-		{"seriesByTag('name=value','what={avg,max}')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
+		{"seriesByTag('name=value','what={avg,max}')", 0, "(Tag1='__name__=value') AND ((has(Tags, 'what=avg')) OR (has(Tags, 'what=max')))", "", false},
 		{"seriesByTag('name=value','what!={avg,max}')", 0, "(Tag1='__name__=value') AND (NOT arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
 		// grafana workaround for multi-value variables default, masked with *
 		{"seriesByTag('name=value','what=~*')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x LIKE 'what=%', Tags))", "", false}, // If All masked to value with *
@@ -187,12 +192,14 @@ func TestTaggedWhere_UseCarbonBehaviourFlag(t *testing.T) {
 			config := config.New()
 			config.ClickHouse.TagsMinInQuery = test.minTags
 			terms, err := ParseSeriesByTag(test.query, config)
+			sort.Sort(TaggedTermList(terms))
 
 			if test.isErr {
 				if err != nil {
 					return
 				}
 			}
+
 			require.NoError(err, testName+", err")
 
 			var w, pw *where.Where
@@ -264,7 +271,7 @@ func TestTaggedWhere_DontMatchMissingTagsFlag(t *testing.T) {
 		{"seriesByTag('name=m{in}')", 0, "Tag1='__name__=min'", "", false},
 		{"seriesByTag('name=m{in,ax}')", 0, "Tag1 IN ('__name__=min','__name__=max')", "", false},
 		{"seriesByTag('name=m{in,ax')", 0, "", "", true},
-		{"seriesByTag('name=value','what={avg,max}')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
+		{"seriesByTag('name=value','what={avg,max}')", 0, "(Tag1='__name__=value') AND ((has(Tags, 'what=avg')) OR (has(Tags, 'what=max')))", "", false},
 		// {"seriesByTag('name=value','what!={avg,max}')", 0, "(Tag1='__name__=value') AND (NOT arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
 		{"seriesByTag('name=value','what!={avg,max}')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x LIKE 'what=%', Tags) AND NOT arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
 		// grafana workaround for multi-value variables default, masked with *
@@ -273,7 +280,7 @@ func TestTaggedWhere_DontMatchMissingTagsFlag(t *testing.T) {
 		{"seriesByTag('name=value','what=~')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x LIKE 'what=%', Tags))", "", false}, // If All masked to value with *
 		// testcases for useCarbonBehaviour=false
 		{"seriesByTag('what=')", 0, "Tag1='what='", "", false},
-		{"seriesByTag('name=value','what=')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x='what=', Tags))", "", false},
+		{"seriesByTag('name=value','what=')", 0, "(Tag1='__name__=value') AND (has(Tags, 'what='))", "", false},
 		// testcases for dontMatchMissingTags=true
 		{"seriesByTag('key!=value')", 0, "Tag1 LIKE 'key=%' AND NOT arrayExists((x) -> x='key=value', Tags)", "", false},
 		{"seriesByTag('dc!=de', 'cpu=cpu-total')", 0, "(Tag1='cpu=cpu-total') AND (arrayExists((x) -> x LIKE 'dc=%', Tags) AND NOT arrayExists((x) -> x='dc=de', Tags))", "", false},
@@ -288,12 +295,14 @@ func TestTaggedWhere_DontMatchMissingTagsFlag(t *testing.T) {
 			config := config.New()
 			config.ClickHouse.TagsMinInQuery = test.minTags
 			terms, err := ParseSeriesByTag(test.query, config)
+			sort.Sort(TaggedTermList(terms))
 
 			if test.isErr {
 				if err != nil {
 					return
 				}
 			}
+
 			require.NoError(err, testName+", err")
 
 			var w, pw *where.Where
@@ -365,7 +374,7 @@ func TestTaggedWhere_BothFeatureFlags(t *testing.T) {
 		{"seriesByTag('name=m{in}')", 0, "Tag1='__name__=min'", "", false},
 		{"seriesByTag('name=m{in,ax}')", 0, "Tag1 IN ('__name__=min','__name__=max')", "", false},
 		{"seriesByTag('name=m{in,ax')", 0, "", "", true},
-		{"seriesByTag('name=value','what={avg,max}')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
+		{"seriesByTag('name=value','what={avg,max}')", 0, "(Tag1='__name__=value') AND ((has(Tags, 'what=avg')) OR (has(Tags, 'what=max')))", "", false},
 		// {"seriesByTag('name=value','what!={avg,max}')", 0, "(Tag1='__name__=value') AND (NOT arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
 		{"seriesByTag('name=value','what!={avg,max}')", 0, "(Tag1='__name__=value') AND (arrayExists((x) -> x LIKE 'what=%', Tags) AND NOT arrayExists((x) -> x IN ('what=avg','what=max'), Tags))", "", false},
 		// grafana workaround for multi-value variables default, masked with *
@@ -389,12 +398,14 @@ func TestTaggedWhere_BothFeatureFlags(t *testing.T) {
 			config := config.New()
 			config.ClickHouse.TagsMinInQuery = test.minTags
 			terms, err := ParseSeriesByTag(test.query, config)
+			sort.Sort(TaggedTermList(terms))
 
 			if test.isErr {
 				if err != nil {
 					return
 				}
 			}
+
 			require.NoError(err, testName+", err")
 
 			var w, pw *where.Where
@@ -423,10 +434,12 @@ func TestParseSeriesByTag(t *testing.T) {
 		p, err := ParseSeriesByTag(query, config)
 		assert.NoError(err)
 		assert.Equal(len(expected), len(p))
+
 		length := len(expected)
 		if length < len(p) {
 			length = len(p)
 		}
+
 		for i := 0; i < length; i++ {
 			if i >= len(p) {
 				t.Errorf("%s\n- [%d]=%+v", query, i, expected[i])
@@ -462,12 +475,12 @@ func TestParseSeriesByTag(t *testing.T) {
 		{Op: TaggedTermEq, Key: "cpu", Value: "cpu-total"},
 		{Op: TaggedTermMatch, Key: "host", Value: `Vladimirs-MacBook-Pro\.local`},
 	})
-
 }
 
 func newInt(i int) *int {
 	p := new(int)
 	*p = i
+
 	return p
 }
 
@@ -485,19 +498,23 @@ func TestParseSeriesByTagWithCosts(t *testing.T) {
 	ok := func(query string, expected []TaggedTerm) {
 		config := config.New()
 		config.ClickHouse.TaggedCosts = taggedCosts
-		p, err := ParseSeriesByTag(query, config)
+		terms, err := ParseSeriesByTag(query, config)
+		SetCosts(terms, config.ClickHouse.TaggedCosts)
+		SortTaggedTermsByCost(terms)
 		assert.NoError(err)
+
 		length := len(expected)
-		if length < len(p) {
-			length = len(p)
+		if length < len(terms) {
+			length = len(terms)
 		}
+
 		for i := 0; i < length; i++ {
-			if i >= len(p) {
+			if i >= len(terms) {
 				t.Errorf("%s\n- [%d]=%+v", query, i, expected[i])
 			} else if i >= len(expected) {
-				t.Errorf("%s\n+ [%d]=%+v", query, i, p[i])
-			} else if p[i] != expected[i] {
-				t.Errorf("%s\n- [%d]=%+v\n+ [%d]=%+v", query, i, expected[i], i, p[i])
+				t.Errorf("%s\n+ [%d]=%+v", query, i, terms[i])
+			} else if terms[i] != expected[i] {
+				t.Errorf("%s\n- [%d]=%+v\n+ [%d]=%+v", query, i, expected[i], i, terms[i])
 			}
 		}
 	}
@@ -589,16 +606,338 @@ func BenchmarkParseSeriesByTag(b *testing.B) {
 	}
 }
 
+func TestParseSeriesByTagWithCostsFromCountTable(t *testing.T) {
+	assert := assert.New(t)
+
+	var from, until int64
+	// 2022-11-11 00:01:00 +05:00 && 2022-11-11 00:01:10 +05:00
+	from, until = 1668106860, 1668106870
+
+	taggedCosts := map[string]*config.Costs{
+		"environment": {Cost: newInt(100)},
+		"dc":          {Cost: newInt(60)},
+		"project":     {Cost: newInt(50)},
+		"__name__":    {Cost: newInt(0), ValuesCost: map[string]int{"high_cost": 70}},
+		"key":         {ValuesCost: map[string]int{"value2": 70, "value3": -1, "val*4": -1, "^val.*4$": -1}},
+	}
+
+	ok := func(
+		testName, query, sql string,
+		response *chtest.TestResponse,
+		expected []TaggedTerm,
+		expectedErr error,
+		useTagCostsFromConfig bool,
+	) {
+		srv := chtest.NewTestServer()
+		defer srv.Close()
+
+		cfg, _ := config.DefaultConfig()
+		cfg.ClickHouse.URL = srv.URL
+
+		if useTagCostsFromConfig {
+			cfg.ClickHouse.TaggedCosts = taggedCosts
+		}
+
+		srv.AddResponce(sql, response)
+
+		opts := clickhouse.Options{
+			Timeout:                 cfg.ClickHouse.IndexTimeout,
+			ConnectTimeout:          cfg.ClickHouse.ConnectTimeout,
+			TLSConfig:               cfg.ClickHouse.TLSConfig,
+			CheckRequestProgress:    cfg.FeatureFlags.LogQueryProgress,
+			ProgressSendingInterval: cfg.ClickHouse.ProgressSendingInterval,
+		}
+
+		taggedFinder := NewTagged(
+			cfg.ClickHouse.URL,
+			cfg.ClickHouse.TaggedTable,
+			"tag1_count_table", // non-empty string, tagged finder will query clickhouse for costs
+			true,
+			cfg.FeatureFlags.UseCarbonBehavior,
+			cfg.FeatureFlags.DontMatchMissingTags,
+			false,
+			opts,
+			cfg.ClickHouse.TaggedCosts,
+		)
+
+		terms, err := taggedFinder.PrepareTaggedTerms(context.Background(), cfg, query, from, until)
+		if expectedErr != nil {
+			assert.Equal(expectedErr, err, testName+", err")
+			return
+		}
+
+		assert.NoError(err)
+
+		length := len(expected)
+		if length < len(terms) {
+			length = len(terms)
+		}
+
+		for i := 0; i < length; i++ {
+			if i >= len(terms) {
+				t.Errorf("%s\n- [%d]=%+v", testName, i, expected[i])
+			} else if i >= len(expected) {
+				t.Errorf("%s\n+ [%d]=%+v", testName, i, terms[i])
+			} else if terms[i] != expected[i] {
+				t.Errorf("%s\n- [%d]=%+v\n+ [%d]=%+v", testName, i, expected[i], i, terms[i])
+			}
+		}
+	}
+
+	ok(
+		`3 TaggedTermEq, database contains all of them`,
+		`seriesByTag('environment=production', 'dc=west', 'key=value')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`(((Tag1='environment=production') OR (Tag1='dc=west')) OR (Tag1='key=value')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\ndc=west\t10\nkey=value\t1\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "key", Value: "value", Cost: 1, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 10, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 100, NonDefaultCost: true},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`3 TaggedTermEq, database doesn't contain 1 of them`,
+		`seriesByTag('environment=production', 'dc=west', 'key=value')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`(((Tag1='environment=production') OR (Tag1='dc=west')) OR (Tag1='key=value')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\nkey=value\t1\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 0, NonDefaultCost: false},
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 0, NonDefaultCost: false},
+			{Op: TaggedTermEq, Key: "key", Value: "value", Cost: 0, NonDefaultCost: false},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`3 TaggedTermEq, database doesn't contain any of them`,
+		`seriesByTag('environment=production', 'dc=west', 'key=value')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`(((Tag1='environment=production') OR (Tag1='dc=west')) OR (Tag1='key=value')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte(""),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 0, NonDefaultCost: false},
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 0, NonDefaultCost: false},
+			{Op: TaggedTermEq, Key: "key", Value: "value", Cost: 0, NonDefaultCost: false},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`3 TaggedTermEq, one of them has a wildcard`,
+		`seriesByTag('environment=production', 'dc=*', 'key=value')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`((Tag1='environment=production') OR (Tag1='key=value')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\nkey=value\t2\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "key", Value: "value", Cost: 2, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 100, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "dc", Value: "*", Cost: 0, NonDefaultCost: false, HasWildcard: true},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`2 TaggedTermEq, 2 TaggedTermMatch`,
+		`seriesByTag('environment=production', 'dc=west', 'status=~^o.*', 'key=~val.*')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`((Tag1='environment=production') OR (Tag1='dc=west')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\ndc=west\t10\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 10, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 100, NonDefaultCost: true},
+			{Op: TaggedTermMatch, Key: "status", Value: "^o.*", Cost: 0},
+			{Op: TaggedTermMatch, Key: "key", Value: "val.*", Cost: 0},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`2 TaggedTermEq, 2 TaggedTermNe`,
+		`seriesByTag('environment=production', 'dc=west', 'status!=on', 'key!=value')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`((Tag1='environment=production') OR (Tag1='dc=west')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\ndc=west\t10\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 10, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 100, NonDefaultCost: true},
+			{Op: TaggedTermNe, Key: "status", Value: "on", Cost: 0},
+			{Op: TaggedTermNe, Key: "key", Value: "value", Cost: 0},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`2 TaggedTermEq, 2 TaggedTermNotMatch`,
+		`seriesByTag('environment=production', 'dc=west', 'status!=~^o.*', 'key!=~val.*')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`((Tag1='environment=production') OR (Tag1='dc=west')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\ndc=west\t10\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 10, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 100, NonDefaultCost: true},
+			{Op: TaggedTermNotMatch, Key: "status", Value: "^o.*", Cost: 0},
+			{Op: TaggedTermNotMatch, Key: "key", Value: "val.*", Cost: 0},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`3 TaggedTermMatch`,
+		`seriesByTag('environment=~prod', 'dc=~west', 'key=~^val')`,
+		``,
+		nil,
+		[]TaggedTerm{
+			{Op: TaggedTermMatch, Key: "environment", Value: "prod", Cost: 0},
+			{Op: TaggedTermMatch, Key: "dc", Value: "west", Cost: 0},
+			{Op: TaggedTermMatch, Key: "key", Value: "^val", Cost: 0},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`3 TaggedTermEq, 2 have same tag`,
+		`seriesByTag('environment=production', 'dc=west', 'dc=east')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`(((Tag1='environment=production') OR (Tag1='dc=west')) OR (Tag1='dc=east')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\ndc=west\t10\ndc=east\t5\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "dc", Value: "east", Cost: 5, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 10, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 100, NonDefaultCost: true},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`3 TaggedTermEq, 1 of them has __name__ key`,
+		`seriesByTag('name=load.avg', 'environment=production', 'dc=west')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`(((Tag1='__name__=load.avg') OR (Tag1='environment=production')) OR (Tag1='dc=west')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\ndc=west\t10\n__name__=load.avg\t10000\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 10, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 100, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "__name__", Value: "load.avg", Cost: 10000, NonDefaultCost: true},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`3 TaggedTermEq, 1 of them has __name__ key, 1 does not exist in count table`,
+		`seriesByTag('environment=production', 'dc=west', 'name=load.avg')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`(((Tag1='environment=production') OR (Tag1='dc=west')) OR (Tag1='__name__=load.avg')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\n__name__=load.avg\t10000\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "__name__", Value: "load.avg", Cost: 0, NonDefaultCost: false},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 0, NonDefaultCost: false},
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 0, NonDefaultCost: false},
+		},
+		nil,
+		false,
+	)
+
+	ok(
+		`Clickhouse returned broken response`,
+		`seriesByTag('environment=production', 'dc=west', 'key=value')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`(((Tag1='environment=production') OR (Tag1='dc=west')) OR (Tag1='key=value')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("broken_response"),
+		},
+		nil,
+		fmt.Errorf("failed to parse result from clickhouse while querying for tag costs: no tag count"),
+		false,
+	)
+
+	ok(
+		`3 TaggedTermEq, 1 of them has __name__ key, 1 does not exist in count table, fallback to config costs`,
+		`seriesByTag('name=high_cost', 'environment=production', 'dc=west')`,
+		`SELECT Tag1, sum(Count) as cnt FROM tag1_count_table WHERE `+
+			`(((Tag1='__name__=high_cost') OR (Tag1='environment=production')) OR (Tag1='dc=west')) `+
+			`AND (Date >= '`+date.FromTimestampToDaysFormat(from)+`' AND Date <= '`+date.FromTimestampToDaysFormat(until)+`') `+
+			`GROUP BY Tag1 FORMAT TabSeparatedRaw`,
+		&chtest.TestResponse{
+			Body: []byte("environment=production\t100\n__name__=load.avg\t10000\n"),
+		},
+		[]TaggedTerm{
+			{Op: TaggedTermEq, Key: "dc", Value: "west", Cost: 60, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "__name__", Value: "high_cost", Cost: 70, NonDefaultCost: true},
+			{Op: TaggedTermEq, Key: "environment", Value: "production", Cost: 100, NonDefaultCost: true},
+		},
+		nil,
+		true,
+	)
+}
+
 func TestTaggedFinder_whereFilter(t *testing.T) {
 	tests := []struct {
-		name         string
-		query        string
-		from         int64
-		until        int64
-		dailyEnabled bool
-		taggedCosts  map[string]*config.Costs
-		want         string
-		wantPre      string
+		name                 string
+		query                string
+		from                 int64
+		until                int64
+		dailyEnabled         bool
+		useCarbonBehavior    bool
+		dontMatchMissingTags bool
+		taggedCosts          map[string]*config.Costs
+		want                 string
+		wantPre              string
 	}{
 		{
 			name:         "nodaily",
@@ -620,32 +959,51 @@ func TestTaggedFinder_whereFilter(t *testing.T) {
 				date.FromTimestampToDaysFormat(1668124800) + "' AND Date <= '" + date.UntilTimestampToDaysFormat(1668124810) + "')",
 			wantPre: "",
 		},
+		{
+			name:              "",
+			query:             "seriesByTag('emptyval=', 'what=value')",
+			from:              1668124800, // 2022-11-11 00:00:00 UTC
+			until:             1668124810, // 2022-11-11 00:00:10 UTC
+			dailyEnabled:      true,
+			useCarbonBehavior: true,
+			want: "((Tag1='what=value') AND (NOT arrayExists((x) -> x LIKE 'emptyval=%', Tags))) AND (Date >='" +
+				date.FromTimestampToDaysFormat(1668124800) + "' AND Date <= '" + date.UntilTimestampToDaysFormat(1668124810) + "')",
+			wantPre: "",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name+" "+time.Unix(tt.from, 0).Format(time.RFC3339), func(t *testing.T) {
 			config := config.New()
 			config.ClickHouse.TaggedCosts = tt.taggedCosts
-			terms, err := ParseSeriesByTag(tt.query, config)
-			if err != nil {
-				t.Fatal(err)
-			}
+			config.FeatureFlags.UseCarbonBehavior = tt.useCarbonBehavior
+			config.FeatureFlags.DontMatchMissingTags = tt.dontMatchMissingTags
+
 			f := NewTagged(
 				"http://localhost:8123/",
 				"graphite_tags",
+				"",
 				tt.dailyEnabled,
-				false,
-				false,
+				tt.useCarbonBehavior,
+				tt.dontMatchMissingTags,
 				false,
 				clickhouse.Options{},
 				tt.taggedCosts,
 			)
+
+			terms, err := f.PrepareTaggedTerms(context.Background(), config, tt.query, tt.from, tt.until)
+			if err != nil {
+				t.Fatal(err)
+			}
+
 			got, gotDate, err := f.whereFilter(terms, tt.from, tt.until)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if got.String() != tt.want {
 				t.Errorf("TaggedFinder.whereFilter()[0] = %v, want %v", got, tt.want)
 			}
+
 			if gotDate.String() != tt.wantPre {
 				t.Errorf("TaggedFinder.whereFilter()[1] = %v, want %v", gotDate, tt.wantPre)
 			}
@@ -682,8 +1040,9 @@ func TestTaggedFinder_Abs(t *testing.T) {
 			if tt.cached {
 				tf = NewCachedTags(nil)
 			} else {
-				tf = NewTagged("http:/127.0.0.1:8123", "graphite_tags", true, false, false, false, clickhouse.Options{}, nil)
+				tf = NewTagged("http:/127.0.0.1:8123", "graphite_tags", "", true, false, false, false, clickhouse.Options{}, nil)
 			}
+
 			if got := string(tf.Abs(tt.v)); got != string(tt.want) {
 				t.Errorf("TaggedDecode() =\n%q\nwant\n%q", got, string(tt.want))
 			}

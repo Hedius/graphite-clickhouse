@@ -50,6 +50,7 @@ func (a *SDType) Set(value string) error {
 	default:
 		return fmt.Errorf("invalid sd type %q", value)
 	}
+
 	return nil
 }
 
@@ -122,6 +123,7 @@ type Common struct {
 type FeatureFlags struct {
 	UseCarbonBehavior    bool `toml:"use-carbon-behaviour" json:"use-carbon-behaviour" comment:"if true, prefers carbon's behaviour on how tags are treated"`
 	DontMatchMissingTags bool `toml:"dont-match-missing-tags" json:"dont-match-missing-tags" comment:"if true, seriesByTag terms containing '!=' or '!=~' operators will not match metrics that don't have the tag at all"`
+	LogQueryProgress     bool `toml:"log-query-progress" json:"log-query-progress" comment:"if true, gch will log affected rows count by clickhouse query"`
 }
 
 // IndexReverseRule contains rules to use direct or reversed request to index table
@@ -185,10 +187,12 @@ func binarySearchQueryParamLe(a []QueryParam, duration time.Duration, start, end
 		if a[start].Duration > duration {
 			return -1
 		}
+
 		return start
 	}
 
 	var result int
+
 	mid := start + length/2
 	if a[mid].Duration > duration {
 		result = binarySearchQueryParamLe(a, duration, start, mid)
@@ -206,6 +210,8 @@ type ClickHouse struct {
 	URL         string        `toml:"url"                      json:"url"                      comment:"default url, see https://clickhouse.tech/docs/en/interfaces/http. Can be overwritten with query-params"`
 	DataTimeout time.Duration `toml:"data-timeout"             json:"data-timeout"             comment:"default total timeout to fetch data, can be overwritten with query-params"`
 	QueryParams []QueryParam  `toml:"query-params"             json:"query-params"             comment:"customized query params (url, data timeout, limiters) for durations greater or equal"`
+
+	ProgressSendingInterval time.Duration `toml:"progress-sending-interval" json:"progress-sending-interval" comment:"time interval for ch query progress sending, it's equal to http_headers_progress_interval_ms header"`
 
 	RenderMaxQueries        int `toml:"render-max-queries" json:"render-max-queries" comment:"Max queries to render queiries"`
 	RenderConcurrentQueries int `toml:"render-concurrent-queries" json:"render-concurrent-queries" comment:"Concurrent queries to render queiries"`
@@ -235,6 +241,7 @@ type ClickHouse struct {
 	IndexReverses        IndexReverses         `toml:"index-reverses"           json:"index-reverses"           comment:"see doc/config.md"                                                                                                              commented:"true"`
 	IndexTimeout         time.Duration         `toml:"index-timeout"            json:"index-timeout"            comment:"total timeout to fetch series list from index"`
 	TaggedTable          string                `toml:"tagged-table"             json:"tagged-table"             comment:"'tagged' table from carbon-clickhouse, required for seriesByTag"`
+	TagsCountTable       string                `toml:"tags-count-table"         json:"tags-count-table"         comment:"Table that contains the total amounts of each tag-value pair. It is used to avoid usage of high cardinality tag-value pairs when querying TaggedTable. If left empty, basic sorting will be used. See more detailed description in doc/config.md"`
 	TaggedAutocompleDays int                   `toml:"tagged-autocomplete-days" json:"tagged-autocomplete-days" comment:"or how long the daemon will query tags during autocomplete"`
 	TaggedUseDaily       bool                  `toml:"tagged-use-daily"         json:"tagged-use-daily"         comment:"whether to use date filter when searching for the metrics in the tagged-table"`
 	TaggedCosts          map[string]*Costs     `toml:"tagged-costs"             json:"tagged-costs"             comment:"costs for tags (for tune which tag will be used as primary), by default is 0, increase for costly (with poor selectivity) tags" commented:"true"`
@@ -267,6 +274,7 @@ func clickhouseURLValidate(chURL string) (*url.URL, error) {
 	} else if strings.Contains(u.RawQuery, " ") {
 		return nil, fmt.Errorf("space not allowed in url %q", chURL)
 	}
+
 	return u, nil
 }
 
@@ -386,24 +394,25 @@ func New() *Config {
 			DegragedLoad:     1.0,
 		},
 		ClickHouse: ClickHouse{
-			URL:                  "http://localhost:8123?cancel_http_readonly_queries_on_client_close=1",
-			DataTimeout:          time.Minute,
-			IndexTable:           "graphite_index",
-			IndexUseDaily:        true,
-			TaggedUseDaily:       true,
-			IndexReverse:         "auto",
-			IndexReverses:        IndexReverses{},
-			IndexTimeout:         time.Minute,
-			TaggedTable:          "graphite_tagged",
-			TaggedAutocompleDays: 7,
-			ExtraPrefix:          "",
-			ConnectTimeout:       time.Second,
-			DataTableLegacy:      "",
-			RollupConfLegacy:     "auto",
-			MaxDataPoints:        1048576,
-			InternalAggregation:  true,
-			FindLimiter:          limiter.NoopLimiter{},
-			TagsLimiter:          limiter.NoopLimiter{},
+			URL:                     "http://localhost:8123?cancel_http_readonly_queries_on_client_close=1",
+			DataTimeout:             time.Minute,
+			ProgressSendingInterval: 10 * time.Second,
+			IndexTable:              "graphite_index",
+			IndexUseDaily:           true,
+			TaggedUseDaily:          true,
+			IndexReverse:            "auto",
+			IndexReverses:           IndexReverses{},
+			IndexTimeout:            time.Minute,
+			TaggedTable:             "graphite_tagged",
+			TaggedAutocompleDays:    7,
+			ExtraPrefix:             "",
+			ConnectTimeout:          time.Second,
+			DataTableLegacy:         "",
+			RollupConfLegacy:        "auto",
+			MaxDataPoints:           1048576,
+			InternalAggregation:     true,
+			FindLimiter:             limiter.NoopLimiter{},
+			TagsLimiter:             limiter.NoopLimiter{},
 		},
 		Tags: Tags{
 			Threads:     1,
@@ -437,6 +446,7 @@ func New() *Config {
 // Compile checks if IndexReverseRule are valid in the IndexReverses and compiles regexps if set
 func (ir IndexReverses) Compile() error {
 	var err error
+
 	for i, n := range ir {
 		if len(n.RegexStr) > 0 {
 			if n.Regex, err = regexp.Compile(n.RegexStr); err != nil {
@@ -445,17 +455,19 @@ func (ir IndexReverses) Compile() error {
 		} else if len(n.Prefix) == 0 && len(n.Suffix) == 0 {
 			return fmt.Errorf("empthy index-use-reverses[%d] rule", i)
 		}
+
 		if _, ok := IndexReverse[n.Reverse]; !ok {
 			return fmt.Errorf("%s is not valid value for index-reverses.reverse", n.Reverse)
 		}
-
 	}
+
 	return nil
 }
 
 func newLoggingConfig() zapwriter.Config {
 	cfg := zapwriter.NewConfig()
 	cfg.File = "/var/log/graphite-clickhouse/graphite-clickhouse.log"
+
 	return cfg
 }
 
@@ -487,6 +499,7 @@ func DefaultConfig() (*Config, error) {
 			&IndexReverseRule{Prefix: "prefix", Reverse: "direct"},
 			&IndexReverseRule{RegexStr: "regex", Reverse: "reversed"},
 		}
+
 		err := cfg.ClickHouse.IndexReverses.Compile()
 		if err != nil {
 			return nil, err
@@ -499,6 +512,7 @@ func DefaultConfig() (*Config, error) {
 // PrintDefaultConfig prints the default config with some additions to be useful
 func PrintDefaultConfig() error {
 	buf := new(bytes.Buffer)
+
 	cfg, err := DefaultConfig()
 	if err != nil {
 		return err
@@ -513,12 +527,14 @@ func PrintDefaultConfig() error {
 	out := strings.Replace(buf.String(), "\n", "", 1)
 
 	fmt.Print(out)
+
 	return nil
 }
 
 // ReadConfig reads the content of the file with given name and process it to the *Config
 func ReadConfig(filename string, exactConfig bool) (*Config, []zap.Field, error) {
 	var err error
+
 	var body []byte
 	if filename != "" {
 		body, err = os.ReadFile(filename)
@@ -535,10 +551,12 @@ func Unmarshal(body []byte, exactConfig bool) (cfg *Config, warns []zap.Field, e
 	deprecations := make(map[string]error)
 
 	cfg = New()
+
 	if len(body) != 0 {
 		// TODO: remove in v0.14
 		if bytes.Index(body, []byte("\n[logging]\n")) != -1 || bytes.Index(body, []byte("[logging]")) == 0 {
 			deprecations["logging"] = fmt.Errorf("single [logging] value became multivalue [[logging]]; please, adjust your config")
+
 			body = bytes.ReplaceAll(body, []byte("\n[logging]\n"), []byte("\n[[logging]]\n"))
 			if bytes.Index(body, []byte("[logging]")) == 0 {
 				body = bytes.Replace(body, []byte("[logging]"), []byte("[[logging]]"), 1)
@@ -549,11 +567,9 @@ func Unmarshal(body []byte, exactConfig bool) (cfg *Config, warns []zap.Field, e
 		decoder.Strict(exactConfig)
 
 		err := decoder.Decode(cfg)
-
 		if err != nil {
 			return nil, nil, err
 		}
-
 	}
 
 	if cfg.Logging == nil {
@@ -563,6 +579,7 @@ func Unmarshal(body []byte, exactConfig bool) (cfg *Config, warns []zap.Field, e
 	if cfg.ClickHouse.RenderConcurrentQueries > cfg.ClickHouse.RenderMaxQueries && cfg.ClickHouse.RenderMaxQueries > 0 {
 		cfg.ClickHouse.RenderConcurrentQueries = 0
 	}
+
 	chURL, err := clickhouseURLValidate(cfg.ClickHouse.URL)
 	if err != nil {
 		return nil, nil, err
@@ -573,13 +590,16 @@ func Unmarshal(body []byte, exactConfig bool) (cfg *Config, warns []zap.Field, e
 		if err != nil {
 			return nil, nil, err
 		}
+
 		if chURL.Scheme == "https" {
 			cfg.ClickHouse.TLSConfig = tlsConfig
 		} else {
 			warnings = append(warnings, "TLS configurations is ignored because scheme is not HTTPS")
 		}
+
 		warns = append(warns, zap.Strings("tls-config", warnings))
 	}
+
 	for i := range cfg.ClickHouse.QueryParams {
 		if cfg.ClickHouse.QueryParams[i].ConcurrentQueries > cfg.ClickHouse.QueryParams[i].MaxQueries && cfg.ClickHouse.QueryParams[i].MaxQueries > 0 {
 			cfg.ClickHouse.QueryParams[i].ConcurrentQueries = 0
@@ -588,13 +608,16 @@ func Unmarshal(body []byte, exactConfig bool) (cfg *Config, warns []zap.Field, e
 		if cfg.ClickHouse.QueryParams[i].Duration == 0 {
 			return nil, nil, fmt.Errorf("query duration param not set for: %+v", cfg.ClickHouse.QueryParams[i])
 		}
+
 		if cfg.ClickHouse.QueryParams[i].DataTimeout == 0 {
 			cfg.ClickHouse.QueryParams[i].DataTimeout = cfg.ClickHouse.DataTimeout
 		}
+
 		if cfg.ClickHouse.QueryParams[i].URL == "" {
 			// reuse default url
 			cfg.ClickHouse.QueryParams[i].URL = cfg.ClickHouse.URL
 		}
+
 		if _, err = clickhouseURLValidate(cfg.ClickHouse.QueryParams[i].URL); err != nil {
 			return nil, nil, err
 		}
@@ -659,6 +682,7 @@ func Unmarshal(body []byte, exactConfig bool) (cfg *Config, warns []zap.Field, e
 			if err != nil {
 				return nil, nil, err
 			}
+
 			cfg.Common.Blacklist[i] = r
 		}
 	}
@@ -675,24 +699,30 @@ func Unmarshal(body []byte, exactConfig bool) (cfg *Config, warns []zap.Field, e
 		if err != nil {
 			return nil, nil, err
 		}
+
 		_, port, err := net.SplitHostPort(cfg.Common.Listen)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		rawURL = fmt.Sprintf("http://%s:%s/", hostname, port)
 	}
+
 	cfg.Prometheus.ExternalURL, err = url.Parse(rawURL)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	cfg.Prometheus.ExternalURL.Path = strings.TrimRight(cfg.Prometheus.ExternalURL.Path, "/")
 
 	checkDeprecations(cfg, deprecations)
+
 	if len(deprecations) != 0 {
 		deprecationList := make([]error, len(deprecations))
 		for name, message := range deprecations {
 			deprecationList = append(deprecationList, errors.Wrap(message, name))
 		}
+
 		warns = append(warns, zap.Errors("config deprecations", deprecationList))
 	}
 
@@ -734,6 +764,7 @@ func Unmarshal(body []byte, exactConfig bool) (cfg *Config, warns []zap.Field, e
 			metricsEnabled, "render", duration.String(cfg.ClickHouse.QueryParams[i].Duration),
 		)
 	}
+
 	for u, q := range cfg.ClickHouse.UserLimits {
 		q.Limiter = limiter.NewALimiter(
 			q.MaxQueries, q.ConcurrentQueries, q.AdaptiveQueries, metricsEnabled, u, "all",
@@ -750,34 +781,44 @@ func (c *Config) NeedLoadAvgColect() bool {
 		if c.Common.DegragedMultiply <= 0 {
 			c.Common.DegragedMultiply = 4.0
 		}
+
 		if c.Common.DegragedLoad <= 0 {
 			c.Common.DegragedLoad = 1.0
 		}
+
 		if c.Common.BaseWeight <= 0 {
 			c.Common.BaseWeight = 100
 		}
+
 		if c.Common.SDNamespace == "" {
 			c.Common.SDNamespace = "graphite"
 		}
+
 		if c.Common.SDExpire < 24*time.Hour {
 			c.Common.SDExpire = 24 * time.Hour
 		}
+
 		return true
 	}
+
 	if c.ClickHouse.RenderAdaptiveQueries > 0 {
 		return true
 	}
+
 	if c.ClickHouse.FindAdaptiveQueries > 0 {
 		return true
 	}
+
 	if c.ClickHouse.TagsAdaptiveQueries > 0 {
 		return true
 	}
+
 	for _, u := range c.ClickHouse.UserLimits {
 		if u.AdaptiveQueries > 0 {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -797,6 +838,7 @@ func (c *Config) ProcessDataTables() (err error) {
 			if err != nil {
 				return err
 			}
+
 			c.DataTable[i].TargetMatchAnyRegexp = r
 		}
 
@@ -805,17 +847,21 @@ func (c *Config) ProcessDataTables() (err error) {
 			if err != nil {
 				return err
 			}
+
 			c.DataTable[i].TargetMatchAllRegexp = r
 		}
 
 		rdp := c.DataTable[i].RollupDefaultPrecision
 		rdf := c.DataTable[i].RollupDefaultFunction
+
 		if c.DataTable[i].RollupConf == "auto" || c.DataTable[i].RollupConf == "" {
 			table := c.DataTable[i].Table
 			interval := time.Minute
+
 			if c.DataTable[i].RollupAutoTable != "" {
 				table = c.DataTable[i].RollupAutoTable
 			}
+
 			if c.DataTable[i].RollupAutoInterval != nil {
 				interval = *c.DataTable[i].RollupAutoInterval
 			}
@@ -846,10 +892,12 @@ func (c *Config) ProcessDataTables() (err error) {
 				if !knownDataTableContext[ctx] {
 					return fmt.Errorf("unknown context %#v", ctx)
 				}
+
 				c.DataTable[i].ContextMap[ctx] = true
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -863,22 +911,28 @@ func CreateCache(cacheName string, cacheConfig *CacheConfig) (cache.BytesCache, 
 	if cacheConfig.DefaultTimeoutSec <= 0 && cacheConfig.ShortTimeoutSec <= 0 && cacheConfig.FindTimeoutSec <= 0 {
 		return nil, nil
 	}
+
 	if cacheConfig.DefaultTimeoutSec < cacheConfig.ShortTimeoutSec {
 		cacheConfig.DefaultTimeoutSec = cacheConfig.ShortTimeoutSec
 	}
+
 	if cacheConfig.ShortTimeoutSec < 0 || cacheConfig.DefaultTimeoutSec == cacheConfig.ShortTimeoutSec {
 		// broken value or short timeout not need due to equal
 		cacheConfig.ShortTimeoutSec = 0
 	}
+
 	if cacheConfig.DefaultTimeoutSec < cacheConfig.ShortTimeoutSec {
 		cacheConfig.DefaultTimeoutSec = cacheConfig.ShortTimeoutSec
 	}
+
 	if cacheConfig.ShortDuration == 0 {
 		cacheConfig.ShortDuration = 3 * time.Hour
 	}
+
 	if cacheConfig.ShortUntilOffsetSec == 0 {
 		cacheConfig.ShortUntilOffsetSec = 120
 	}
+
 	cacheConfig.DefaultTimeoutStr = strconv.Itoa(int(cacheConfig.DefaultTimeoutSec))
 	cacheConfig.ShortTimeoutStr = strconv.Itoa(int(cacheConfig.ShortTimeoutSec))
 
@@ -887,6 +941,7 @@ func CreateCache(cacheName string, cacheConfig *CacheConfig) (cache.BytesCache, 
 		if len(cacheConfig.MemcachedServers) == 0 {
 			return nil, fmt.Errorf(cacheName + ": memcache cache requested but no memcache servers provided")
 		}
+
 		return cache.NewMemcached("gch-"+cacheName, cacheConfig.MemcachedServers...), nil
 	case "mem":
 		return cache.NewExpireCache(uint64(cacheConfig.Size * 1024 * 1024)), nil
@@ -909,9 +964,11 @@ func (c *Config) setupGraphiteMetrics() bool {
 		if c.Metrics.MetricInterval == 0 {
 			c.Metrics.MetricInterval = 60 * time.Second
 		}
+
 		if c.Metrics.MetricTimeout == 0 {
 			c.Metrics.MetricTimeout = time.Second
 		}
+
 		hostname, _ := os.Hostname()
 		fqdn := strings.ReplaceAll(hostname, ".", "_")
 		hostname = strings.Split(hostname, ".")[0]
@@ -925,6 +982,7 @@ func (c *Config) setupGraphiteMetrics() bool {
 
 		if c.Metrics.Statsd != "" && c.Metrics.ExtendedStat {
 			var err error
+
 			config := &statsd.ClientConfig{
 				Address:       c.Metrics.Statsd,
 				Prefix:        c.Metrics.MetricPrefix,
@@ -932,9 +990,11 @@ func (c *Config) setupGraphiteMetrics() bool {
 				UseBuffered:   true,
 				FlushInterval: 300 * time.Millisecond,
 			}
+
 			metrics.Gstatsd, err = statsd.NewClientWithConfig(config)
 			if err != nil {
 				metrics.Gstatsd = metrics.NullSender{}
+
 				fmt.Fprintf(os.Stderr, "statsd init: %v\n", err)
 			}
 		}
@@ -944,14 +1004,21 @@ func (c *Config) setupGraphiteMetrics() bool {
 
 	metrics.AutocompleteQMetric = metrics.InitQueryMetrics("tags", &c.Metrics)
 	metrics.FindQMetric = metrics.InitQueryMetrics("find", &c.Metrics)
+
 	for i := 0; i < len(c.DataTable); i++ {
 		c.DataTable[i].QueryMetrics = metrics.InitQueryMetrics(c.DataTable[i].Table, &c.Metrics)
 	}
+
 	if c.ClickHouse.IndexTable != "" {
 		metrics.InitQueryMetrics(c.ClickHouse.IndexTable, &c.Metrics)
 	}
+
 	if c.ClickHouse.TaggedTable != "" {
 		metrics.InitQueryMetrics(c.ClickHouse.TaggedTable, &c.Metrics)
+	}
+
+	if c.ClickHouse.TagsCountTable != "" {
+		metrics.InitQueryMetrics(c.ClickHouse.TagsCountTable, &c.Metrics)
 	}
 
 	return metrics.Graphite != nil
@@ -963,6 +1030,7 @@ func (c *Config) GetUserFindLimiter(username string) limiter.ServerLimiter {
 			return q.Limiter
 		}
 	}
+
 	return c.ClickHouse.FindLimiter
 }
 
@@ -972,6 +1040,7 @@ func (c *Config) GetUserTagsLimiter(username string) limiter.ServerLimiter {
 			return q.Limiter
 		}
 	}
+
 	return c.ClickHouse.TagsLimiter
 }
 

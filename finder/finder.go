@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/lomik/graphite-clickhouse/helper/clickhouse"
+	"github.com/lomik/graphite-clickhouse/metrics"
 
 	"github.com/lomik/graphite-clickhouse/config"
 )
@@ -14,25 +15,20 @@ type Result interface {
 	Series() [][]byte
 	Abs([]byte) []byte
 	Bytes() ([]byte, error)
+	Stats() []metrics.FinderStat
 }
-
-type FinderStat struct {
-	ReadBytes   int64
-	ChReadRows  int64
-	ChReadBytes int64
-	Table       string
-}
-
 type Finder interface {
 	Result
-	Execute(ctx context.Context, config *config.Config, query string, from int64, until int64, stat *FinderStat) error
+	Execute(ctx context.Context, config *config.Config, query string, from int64, until int64) error
 }
 
 func newPlainFinder(ctx context.Context, config *config.Config, query string, from int64, until int64, useCache bool) Finder {
 	opts := clickhouse.Options{
-		TLSConfig:      config.ClickHouse.TLSConfig,
-		Timeout:        config.ClickHouse.IndexTimeout,
-		ConnectTimeout: config.ClickHouse.ConnectTimeout,
+		TLSConfig:               config.ClickHouse.TLSConfig,
+		Timeout:                 config.ClickHouse.IndexTimeout,
+		ConnectTimeout:          config.ClickHouse.ConnectTimeout,
+		CheckRequestProgress:    config.FeatureFlags.LogQueryProgress,
+		ProgressSendingInterval: config.ClickHouse.ProgressSendingInterval,
 	}
 
 	var f Finder
@@ -41,6 +37,7 @@ func newPlainFinder(ctx context.Context, config *config.Config, query string, fr
 		f = NewTagged(
 			config.ClickHouse.URL,
 			config.ClickHouse.TaggedTable,
+			config.ClickHouse.TagsCountTable,
 			config.ClickHouse.TaggedUseDaily,
 			config.FeatureFlags.UseCarbonBehavior,
 			config.FeatureFlags.DontMatchMissingTags,
@@ -107,13 +104,12 @@ func newPlainFinder(ctx context.Context, config *config.Config, query string, fr
 	return f
 }
 
-func Find(config *config.Config, ctx context.Context, query string, from int64, until int64, stat *FinderStat) (Result, error) {
+func Find(config *config.Config, ctx context.Context, query string, from int64, until int64) (Result, error) {
 	fnd := newPlainFinder(ctx, config, query, from, until, config.Common.FindCache != nil)
-	err := fnd.Execute(ctx, config, query, from, until, stat)
-	if err != nil {
-		return nil, err
-	}
-	return fnd.(Result), nil
+
+	err := fnd.Execute(ctx, config, query, from, until)
+
+	return fnd.(Result), err
 }
 
 // Leaf strips last dot and detect IsLeaf
@@ -125,11 +121,13 @@ func Leaf(value []byte) ([]byte, bool) {
 	return value, true
 }
 
-func FindTagged(ctx context.Context, config *config.Config, terms []TaggedTerm, from int64, until int64, stat *FinderStat) (Result, error) {
+func FindTagged(ctx context.Context, config *config.Config, terms []TaggedTerm, from int64, until int64) (Result, error) {
 	opts := clickhouse.Options{
-		Timeout:        config.ClickHouse.IndexTimeout,
-		ConnectTimeout: config.ClickHouse.ConnectTimeout,
-		TLSConfig:      config.ClickHouse.TLSConfig,
+		Timeout:                 config.ClickHouse.IndexTimeout,
+		ConnectTimeout:          config.ClickHouse.ConnectTimeout,
+		TLSConfig:               config.ClickHouse.TLSConfig,
+		CheckRequestProgress:    config.FeatureFlags.LogQueryProgress,
+		ProgressSendingInterval: config.ClickHouse.ProgressSendingInterval,
 	}
 
 	useCache := config.Common.FindCache != nil
@@ -137,16 +135,19 @@ func FindTagged(ctx context.Context, config *config.Config, terms []TaggedTerm, 
 	plain := makePlainFromTagged(terms)
 	if plain != nil {
 		plain.wrappedPlain = newPlainFinder(ctx, config, plain.Target(), from, until, useCache)
-		err := plain.Execute(ctx, config, plain.Target(), from, until, stat)
+
+		err := plain.Execute(ctx, config, plain.Target(), from, until)
 		if err != nil {
 			return nil, err
 		}
+
 		return Result(plain), nil
 	}
 
 	fnd := NewTagged(
 		config.ClickHouse.URL,
 		config.ClickHouse.TaggedTable,
+		config.ClickHouse.TagsCountTable,
 		config.ClickHouse.TaggedUseDaily,
 		config.FeatureFlags.UseCarbonBehavior,
 		config.FeatureFlags.DontMatchMissingTags,
@@ -155,7 +156,7 @@ func FindTagged(ctx context.Context, config *config.Config, terms []TaggedTerm, 
 		config.ClickHouse.TaggedCosts,
 	)
 
-	err := fnd.ExecutePrepared(ctx, terms, from, until, stat)
+	err := fnd.ExecutePrepared(ctx, terms, from, until)
 	if err != nil {
 		return nil, err
 	}

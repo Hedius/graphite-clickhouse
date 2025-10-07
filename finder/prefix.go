@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lomik/graphite-clickhouse/config"
+	"github.com/lomik/graphite-clickhouse/metrics"
 	"github.com/lomik/graphite-clickhouse/pkg/where"
 )
 
@@ -29,6 +30,7 @@ func bytesConcat(s1 []byte, s2 []byte) []byte {
 	ret := make([]byte, len(s1)+len(s2))
 	copy(ret, s1)
 	copy(ret[len(s1):], s2)
+
 	return ret
 }
 
@@ -41,7 +43,7 @@ func WrapPrefix(f Finder, prefix string) *PrefixFinder {
 	}
 }
 
-func (p *PrefixFinder) Execute(ctx context.Context, config *config.Config, query string, from int64, until int64, stat *FinderStat) error {
+func (p *PrefixFinder) Execute(ctx context.Context, config *config.Config, query string, from int64, until int64) error {
 	qs := strings.Split(query, ".")
 
 	// check regexp
@@ -59,6 +61,7 @@ func (p *PrefixFinder) Execute(ctx context.Context, config *config.Config, query
 		if err != nil {
 			return err
 		}
+
 		if !m { // not matched
 			return nil
 		}
@@ -68,12 +71,13 @@ func (p *PrefixFinder) Execute(ctx context.Context, config *config.Config, query
 		// prefix matched, but not finished
 		p.part = strings.Join(ps[:len(qs)], ".") + "."
 		p.matched = PrefixPartialMathed
+
 		return nil
 	}
 
 	p.matched = PrefixMatched
 
-	return p.wrapped.Execute(ctx, config, strings.Join(qs[len(ps):], "."), from, until, stat)
+	return p.wrapped.Execute(ctx, config, strings.Join(qs[len(ps):], "."), from, until)
 }
 
 func (p *PrefixFinder) List() [][]byte {
@@ -114,4 +118,8 @@ func (p *PrefixFinder) Abs(value []byte) []byte {
 
 func (p *PrefixFinder) Bytes() ([]byte, error) {
 	return nil, ErrNotImplemented
+}
+
+func (p *PrefixFinder) Stats() []metrics.FinderStat {
+	return p.wrapped.Stats()
 }

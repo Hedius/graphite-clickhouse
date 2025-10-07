@@ -9,6 +9,7 @@ import (
 	"github.com/lomik/graphite-clickhouse/config"
 	"github.com/lomik/graphite-clickhouse/helper/clickhouse"
 	"github.com/lomik/graphite-clickhouse/helper/errs"
+	"github.com/lomik/graphite-clickhouse/metrics"
 	"github.com/lomik/graphite-clickhouse/pkg/scope"
 	"github.com/lomik/graphite-clickhouse/pkg/where"
 )
@@ -31,6 +32,7 @@ type SplitIndexFinder struct {
 	wrapped Finder
 	body    []byte
 	rows    [][]byte
+	stats   []metrics.FinderStat
 	// useWrapped indicated if we should use wrapped Finder.
 	useWrapped          bool
 	useReverse          bool
@@ -74,7 +76,6 @@ func (splitFinder *SplitIndexFinder) Execute(
 	query string,
 	from int64,
 	until int64,
-	stat *FinderStat,
 ) error {
 	if where.HasUnmatchedBrackets(query) {
 		return errs.NewErrorWithCode("query has unmatched brackets", http.StatusBadRequest)
@@ -85,7 +86,7 @@ func (splitFinder *SplitIndexFinder) Execute(
 	idx := strings.IndexAny(query, "{}")
 	if idx == -1 {
 		splitFinder.useWrapped = true
-		return splitFinder.wrapped.Execute(ctx, config, query, from, until, stat)
+		return splitFinder.wrapped.Execute(ctx, config, query, from, until)
 	}
 
 	splitQueries, err := splitQuery(query, config.ClickHouse.MaxNodeToSplitIndex)
@@ -95,13 +96,16 @@ func (splitFinder *SplitIndexFinder) Execute(
 
 	if len(splitQueries) <= 1 {
 		splitFinder.useWrapped = true
-		return splitFinder.wrapped.Execute(ctx, config, query, from, until, stat)
+		return splitFinder.wrapped.Execute(ctx, config, query, from, until)
 	}
 
 	w, err := splitFinder.whereFilter(splitQueries, from, until)
 	if err != nil {
 		return err
 	}
+
+	splitFinder.stats = append(splitFinder.stats, metrics.FinderStat{})
+	stat := &splitFinder.stats[len(splitFinder.stats)-1]
 
 	splitFinder.body, stat.ChReadRows, stat.ChReadBytes, err = clickhouse.Query(
 		scope.WithTable(ctx, splitFinder.table),
@@ -112,12 +116,14 @@ func (splitFinder *SplitIndexFinder) Execute(
 		nil,
 	)
 	stat.Table = splitFinder.table
+
 	if err != nil {
 		return err
 	}
 
 	stat.ReadBytes = int64(len(splitFinder.body))
 	splitFinder.body, splitFinder.rows, _ = splitIndexBody(splitFinder.body, splitFinder.useReverse, splitFinder.useCache)
+
 	return nil
 }
 
@@ -133,6 +139,7 @@ func splitQuery(query string, maxNodeToSplitIdx int) ([]string, error) {
 
 	lastClosingBracketIndex := strings.LastIndex(query, "}")
 	reverseNodeCount := strings.Count(query[lastClosingBracketIndex:], ".")
+
 	var reverseWildcardIndex int
 	if lastClosingBracketIndex == len(query)-1 {
 		reverseWildcardIndex = -1
@@ -141,17 +148,20 @@ func splitQuery(query string, maxNodeToSplitIdx int) ([]string, error) {
 	}
 
 	useDirect := true
+
 	if directWildcardIndex >= 0 && reverseWildcardIndex >= 0 {
 		return []string{query}, nil
 	} else if directWildcardIndex < 0 && reverseWildcardIndex >= 0 {
 		if directNodeCount > maxNodeToSplitIdx {
 			return []string{query}, nil
 		}
+
 		useDirect = true
 	} else if directWildcardIndex >= 0 && reverseWildcardIndex < 0 {
 		if reverseNodeCount > maxNodeToSplitIdx {
 			return []string{query}, nil
 		}
+
 		useDirect = false
 	} else {
 		if directNodeCount > maxNodeToSplitIdx && reverseNodeCount > maxNodeToSplitIdx {
@@ -177,11 +187,13 @@ func splitQuery(query string, maxNodeToSplitIdx int) ([]string, error) {
 			if directNodeCount > maxNodeToSplitIdx {
 				return []string{query}, nil
 			}
+
 			useDirect = true
 		} else if reverseNodeCount > directNodeCount {
 			if reverseNodeCount > maxNodeToSplitIdx {
 				return []string{query}, nil
 			}
+
 			useDirect = false
 		} else {
 			if choicesInLeftMost >= choicesInRightMost {
@@ -228,6 +240,7 @@ func splitPartOfQuery(prefix, queryPart, suffix string) ([]string, error) {
 
 func (splitFinder *SplitIndexFinder) whereFilter(queries []string, from, until int64) (*where.Where, error) {
 	queryWithWildcardIdx := -1
+
 	for i, q := range queries {
 		err := validatePlainQuery(q, splitFinder.wildcardMinDistance)
 		if err != nil {
@@ -250,6 +263,7 @@ func (splitFinder *SplitIndexFinder) whereFilter(queries []string, from, until i
 
 	nonWildcardQueries := make([]string, 0)
 	aggregatedWhere := where.New()
+
 	for _, q := range queries {
 		if splitFinder.useReverse {
 			q = ReverseString(q)
@@ -313,4 +327,12 @@ func (splitFinder *SplitIndexFinder) Bytes() ([]byte, error) {
 	}
 
 	return splitFinder.body, nil
+}
+
+func (splitFinder *SplitIndexFinder) Stats() []metrics.FinderStat {
+	if splitFinder.useWrapped {
+		return splitFinder.wrapped.Stats()
+	}
+
+	return splitFinder.stats
 }

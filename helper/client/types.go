@@ -41,6 +41,7 @@ func (a *FormatType) Set(value string) error {
 	default:
 		return fmt.Errorf("invalid format type %s", value)
 	}
+
 	return nil
 }
 
@@ -48,7 +49,9 @@ func (a *FormatType) UnmarshalText(text []byte) error {
 	return a.Set(string(text))
 }
 
-var ErrUnsupportedFormat = errors.New("unsupported format")
+var (
+	ErrUnsupportedFormat = errors.New("unsupported format")
+	ErrInvalidQuery      = errors.New("invalid query")
 
-var ErrEmptyQuery = errors.New("missing query")
-var ErrInvalidQuery = errors.New("invalid query")
+	//ErrEmptyQuery = errors.New("missing query")
+)

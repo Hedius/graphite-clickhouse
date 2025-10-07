@@ -51,6 +51,7 @@ func TestTagsMakeSQL(t *testing.T) {
 		} else {
 			assert.NoError(err)
 		}
+
 		assert.Equal(test.sql, sql, testName)
 	}
 }
@@ -61,6 +62,7 @@ func _TestTags(t *testing.T) {
 	mockData := [][]byte{[]byte("mock")}
 
 	type w []string
+
 	mock := w{"mock"}
 	empty := w{}
 
@@ -103,9 +105,8 @@ func _TestTags(t *testing.T) {
 		m := NewMockFinder(mockData)
 		f := WrapTag(m, srv.URL, "graphite_tag", clickhouse.Options{Timeout: time.Second, ConnectTimeout: time.Second})
 
-		var stat FinderStat
 		config := config.New()
-		f.Execute(context.Background(), config, test.query, 0, 0, &stat)
+		f.Execute(context.Background(), config, test.query, 0, 0)
 
 		list := make([]string, 0)
 		for _, r := range f.List() {

@@ -4,9 +4,10 @@
 package prometheus
 
 import (
-	"github.com/prometheus/prometheus/util/annotations"
 	"log"
 	"math"
+
+	"github.com/prometheus/prometheus/util/annotations"
 
 	"github.com/lomik/graphite-clickhouse/helper/point"
 
@@ -53,6 +54,7 @@ func makeSeriesSet(data *data.Data, step int64, keepLastPoint bool) (storage.Ser
 	}
 
 	nextMetric := data.GroupByMetric()
+
 	for {
 		points := nextMetric()
 		if len(points) == 0 {
@@ -102,9 +104,8 @@ func (sit *seriesIterator) At() (t int64, v float64) {
 		// return NaN if the series does not have a point for this step
 		return int64(sit.points[len(sit.points)-1].Time)*1000 + sit.step, math.NaN()
 	}
-	// This works fine as long as our metric has delivered a data point in the selected range.
-	// If lookback-delta is too high this starts creating a pseudo row!... Keep it below 5m.
-	if index < 0 {
+
+	if index < 0 || index >= len(sit.points) {
 		index = 0
 	} else if index >= len(sit.points) {
 		// this achieves that we return the last value in the window to instant requests.
@@ -112,6 +113,7 @@ func (sit *seriesIterator) At() (t int64, v float64) {
 		// This also causes that the point is reported for the full lookback-delta
 		index = len(sit.points) - 1
 	}
+
 	p := sit.points[index]
 	// sit.logger().Debug("seriesIterator.At", zap.Int64("t", int64(p.Time)*1000), zap.Float64("v", p.Value))
 	return int64(p.Time) * 1000, p.Value
@@ -148,6 +150,7 @@ func (sit *seriesIterator) Next() chunkenc.ValueType {
 		if sit.step == 0 && sit.current == len(sit.points)-1 {
 			return chunkenc.ValNone
 		}
+
 		sit.current++
 		// sit.logger().Debug("seriesIterator.Next", zap.Bool("ret", true))
 		return chunkenc.ValFloat
@@ -167,6 +170,7 @@ func (ss *seriesSet) At() storage.Series {
 		// zap.L().Debug("seriesSet.At", zap.String("metricName", "nil"))
 		return nil
 	}
+
 	s := &ss.series[ss.current]
 	// zap.L().Debug("seriesSet.At", zap.String("metricName", s.name()))
 	return s

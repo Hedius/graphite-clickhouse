@@ -36,9 +36,8 @@ func TestPrefixFinderExecute(t *testing.T) {
 
 		f := WrapPrefix(m, test.prefix)
 
-		var stat FinderStat
 		config := config.New()
-		err := f.Execute(context.Background(), config, test.query, 0, 0, &stat)
+		err := f.Execute(context.Background(), config, test.query, 0, 0)
 
 		if test.expectedError {
 			assert.Error(err, testName)
@@ -87,9 +86,8 @@ func TestPrefixFinderList(t *testing.T) {
 		m := NewMockFinder(mockData)
 		f := WrapPrefix(m, prefix)
 
-		var stat FinderStat
 		config := config.New()
-		f.Execute(context.Background(), config, test.query, 0, 0, &stat)
+		f.Execute(context.Background(), config, test.query, 0, 0)
 
 		list := make([]string, 0)
 		for _, r := range f.List() {

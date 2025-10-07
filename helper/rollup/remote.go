@@ -28,6 +28,7 @@ type rollupRulesResponse struct {
 
 func parseJson(body []byte) (*Rules, error) {
 	resp := &rollupRulesResponse{}
+
 	err := json.Unmarshal(body, resp)
 	if err != nil {
 		return nil, err
@@ -55,6 +56,7 @@ func parseJson(body []byte) (*Rules, error) {
 		if len(r.Pattern) == 0 {
 			return nil
 		}
+
 		return &r.Pattern[len(r.Pattern)-1]
 	}
 
@@ -67,11 +69,13 @@ func parseJson(body []byte) (*Rules, error) {
 			if d.Function != "" {
 				defaultFunction = d.Function
 			}
+
 			if d.Age != "" && d.Precision != "" && d.Precision != "0" {
 				rt, err := makeRetention(&d)
 				if err != nil {
 					return nil, err
 				}
+
 				defaultRetention = append(defaultRetention, rt)
 			}
 		} else {
@@ -83,11 +87,13 @@ func parseJson(body []byte) (*Rules, error) {
 					Function:  d.Function,
 				})
 			}
+
 			if d.Age != "" && d.Precision != "" && d.Precision != "0" {
 				rt, err := makeRetention(&d)
 				if err != nil {
 					return nil, err
 				}
+
 				last().Retention = append(last().Retention, rt)
 			}
 		}
@@ -108,6 +114,7 @@ var timeoutRulesLoad = 10 * time.Second
 
 func RemoteLoad(addr string, tlsConf *tls.Config, table string) (*Rules, error) {
 	var db string
+
 	arr := strings.SplitN(table, ".", 2)
 	if len(arr) == 1 {
 		db = "default"
@@ -137,9 +144,11 @@ func RemoteLoad(addr string, tlsConf *tls.Config, table string) (*Rules, error) 
 		addr,
 		query,
 		clickhouse.Options{
-			Timeout:        timeoutRulesLoad,
-			ConnectTimeout: timeoutRulesLoad,
-			TLSConfig:      tlsConf,
+			Timeout:                 timeoutRulesLoad,
+			ConnectTimeout:          timeoutRulesLoad,
+			TLSConfig:               tlsConf,
+			CheckRequestProgress:    false,
+			ProgressSendingInterval: 10 * time.Second,
 		},
 		nil,
 	)
@@ -166,9 +175,11 @@ func RemoteLoad(addr string, tlsConf *tls.Config, table string) (*Rules, error) 
 			addr,
 			query,
 			clickhouse.Options{
-				Timeout:        timeoutRulesLoad,
-				ConnectTimeout: timeoutRulesLoad,
-				TLSConfig:      tlsConf,
+				Timeout:                 timeoutRulesLoad,
+				ConnectTimeout:          timeoutRulesLoad,
+				TLSConfig:               tlsConf,
+				CheckRequestProgress:    false,
+				ProgressSendingInterval: 10 * time.Second,
 			},
 			nil,
 		)
@@ -182,5 +193,6 @@ func RemoteLoad(addr string, tlsConf *tls.Config, table string) (*Rules, error) 
 	if r != nil {
 		r.Updated = time.Now().Unix()
 	}
+
 	return r, err
 }

@@ -6,9 +6,7 @@ import (
 	"github.com/msaf1980/go-syncutils/atomic"
 )
 
-var (
-	loadAvgStore atomic.Float64
-)
+var loadAvgStore atomic.Float64
 
 func Load() float64 {
 	return loadAvgStore.Load()
@@ -26,14 +24,18 @@ func Weight(weight int, degraged, degragedLoadAvg, normalizedLoadAvg float64) in
 	if normalizedLoadAvg > degragedLoadAvg {
 		normalizedLoadAvg *= degraged
 	}
+
 	normalizedLoadAvg = math.Round(10*normalizedLoadAvg) / 10
 	if normalizedLoadAvg == 0 {
 		return 2 * int64(weight)
 	}
+
 	normalizedLoadAvg = math.Log10(normalizedLoadAvg)
+
 	w := int64(weight) - int64(float64(weight)*normalizedLoadAvg)
 	if w <= 0 {
 		return 1
 	}
+
 	return w
 }

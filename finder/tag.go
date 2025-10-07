@@ -8,6 +8,7 @@ import (
 
 	"github.com/lomik/graphite-clickhouse/config"
 	"github.com/lomik/graphite-clickhouse/helper/clickhouse"
+	"github.com/lomik/graphite-clickhouse/metrics"
 	"github.com/lomik/graphite-clickhouse/pkg/scope"
 	"github.com/lomik/graphite-clickhouse/pkg/where"
 )
@@ -33,12 +34,15 @@ func (q TagQ) String() string {
 	if q.Param != nil && q.Value != nil {
 		return fmt.Sprintf("{\"param\"=%#v, \"value\"=%#v}", *q.Param, *q.Value)
 	}
+
 	if q.Param != nil {
 		return fmt.Sprintf("{\"param\"=%#v}", *q.Param)
 	}
+
 	if q.Value != nil {
 		return fmt.Sprintf("{\"value\"=%#v}", *q.Value)
 	}
+
 	return "{}"
 }
 
@@ -46,9 +50,11 @@ func (q *TagQ) Where(field string) string {
 	if q.Param != nil && q.Value != nil && *q.Value != "*" {
 		return where.Eq(field, *q.Param+*q.Value)
 	}
+
 	if q.Param != nil {
 		return where.HasPrefix(field, *q.Param)
 	}
+
 	if q.Value != nil && *q.Value != "*" {
 		return where.Eq(field, *q.Value)
 	}
@@ -61,10 +67,12 @@ type TagFinder struct {
 	url         string             // clickhouse dsn
 	table       string             // graphite_tag table
 	opts        clickhouse.Options // clickhouse timeout, connectTimeout, etc
+	stats       []metrics.FinderStat
 	state       TagState
 	tagQuery    []TagQ
 	seriesQuery string
 	tagPrefix   []byte
+	useWrapped  bool
 	body        []byte // clickhouse response
 }
 
@@ -72,11 +80,12 @@ var EmptyList [][]byte = [][]byte{}
 
 func WrapTag(f Finder, url string, table string, opts clickhouse.Options) *TagFinder {
 	return &TagFinder{
-		wrapped:  f,
-		url:      url,
-		table:    table,
-		opts:     opts,
-		tagQuery: make([]TagQ, 0),
+		wrapped:    f,
+		url:        url,
+		table:      table,
+		opts:       opts,
+		tagQuery:   make([]TagQ, 0),
+		useWrapped: true,
 	}
 }
 
@@ -152,6 +161,7 @@ func (t *TagFinder) MakeSQL(query string) (string, error) {
 		if len(qs) == 0 {
 			break
 		}
+
 		if qs[0] == "_tag" {
 			if len(qs) >= 2 {
 				v := qs[1]
@@ -187,6 +197,7 @@ func (t *TagFinder) MakeSQL(query string) (string, error) {
 		} else {
 			t.state = TagList
 		}
+
 		return t.tagListSQL()
 	}
 
@@ -196,30 +207,37 @@ func (t *TagFinder) MakeSQL(query string) (string, error) {
 	}
 
 	t.state = TagListSeries
+
 	return t.seriesSQL()
 }
 
-func (t *TagFinder) Execute(ctx context.Context, config *config.Config, query string, from int64, until int64, stat *FinderStat) (err error) {
+func (t *TagFinder) Execute(ctx context.Context, config *config.Config, query string, from int64, until int64) (err error) {
 	t.state = TagSkip
 
 	if query == "" {
-		return t.wrapped.Execute(ctx, config, query, from, until, stat)
+		return t.wrapped.Execute(ctx, config, query, from, until)
 	}
 
 	if query == "*" {
 		t.state = TagRoot
-		return t.wrapped.Execute(ctx, config, query, from, until, stat)
+		return t.wrapped.Execute(ctx, config, query, from, until)
 	}
 
 	if !strings.HasPrefix(query, "_tag.") && query != "_tag" {
-		return t.wrapped.Execute(ctx, config, query, from, until, stat)
+		return t.wrapped.Execute(ctx, config, query, from, until)
 	}
 
+	t.useWrapped = false
+
 	var sql string
+
 	sql, err = t.MakeSQL(query)
 	if err != nil || sql == "" {
 		return
 	}
+
+	t.stats = append(t.stats, metrics.FinderStat{})
+	stat := &t.stats[len(t.stats)-1]
 
 	t.body, stat.ChReadRows, stat.ChReadBytes, err = clickhouse.Query(scope.WithTable(ctx, t.table), t.url, sql, t.opts, nil)
 	stat.Table = t.table
@@ -246,11 +264,13 @@ func (t *TagFinder) List() [][]byte {
 	rows := bytes.Split(t.body, []byte{'\n'})
 
 	skip := 0
+
 	for i := 0; i < len(rows); i++ {
 		if len(rows[i]) == 0 {
 			skip++
 			continue
 		}
+
 		if skip > 0 {
 			rows[i-skip] = rows[i]
 		}
@@ -295,15 +315,18 @@ func (t *TagFinder) Series() [][]byte {
 	rows := t.List()
 
 	skip := 0
+
 	for i := 0; i < len(rows); i++ {
 		if len(rows[i]) == 0 {
 			skip++
 			continue
 		}
+
 		if rows[i][len(rows[i])-1] == '.' {
 			skip++
 			continue
 		}
+
 		if skip > 0 {
 			rows[i-skip] = rows[i]
 		}
@@ -322,4 +345,12 @@ func (t *TagFinder) Abs(v []byte) []byte {
 
 func (t *TagFinder) Bytes() ([]byte, error) {
 	return nil, ErrNotImplemented
+}
+
+func (t *TagFinder) Stats() []metrics.FinderStat {
+	if t.useWrapped {
+		return t.wrapped.Stats()
+	}
+
+	return t.stats
 }

@@ -28,8 +28,8 @@ func NewCached(config *config.Config, body []byte) *Find {
 	}
 }
 
-func New(config *config.Config, ctx context.Context, query string, stat *finder.FinderStat) (*Find, error) {
-	res, err := finder.Find(config, ctx, query, 0, 0, stat)
+func New(config *config.Config, ctx context.Context, query string) (*Find, error) {
+	res, err := finder.Find(config, ctx, query, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +87,7 @@ func (f *Find) WritePickle(w io.Writer) error {
 	}
 
 	p.Stop()
+
 	return nil
 }
 
@@ -185,6 +186,7 @@ func (f *Find) WriteProtobufV3(w io.Writer) error {
 			response,
 		},
 	}
+
 	body, err := proto.Marshal(&multiGlobResponse)
 	if err != nil {
 		return err
@@ -203,6 +205,7 @@ func (f *Find) WriteJSON(w io.Writer) error {
 	}
 
 	var numResults int
+
 	var sb stringutils.Builder
 
 	sb.WriteString("[")

@@ -3,9 +3,6 @@ package where
 import "testing"
 
 func Test_ClearGlob(t *testing.T) {
-	type args struct {
-		query string
-	}
 	tests := []struct {
 		query string
 		want  string
@@ -60,6 +57,7 @@ func Test_HasUnmatchedBrackets(t *testing.T) {
 
 func TestGlob(t *testing.T) {
 	field := "test"
+
 	tests := []struct {
 		query string
 		want  string
