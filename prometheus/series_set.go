@@ -105,7 +105,10 @@ func (sit *seriesIterator) At() (t int64, v float64) {
 		return int64(sit.points[len(sit.points)-1].Time)*1000 + sit.step, math.NaN()
 	}
 
-	if index < 0 || index >= len(sit.points) {
+	// This works fine as long as our metric has delivered a data point in the selected range
+	// If lookback-delta is too high this starts creating a pseudo row!... Keep it below 5m.
+	// if index < 0 || index >= len(sit.points) {
+	if index < 0 {
 		index = 0
 	} else if index >= len(sit.points) {
 		// this achieves that we return the last value in the window to instant requests.
